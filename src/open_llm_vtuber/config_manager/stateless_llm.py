@@ -64,6 +64,7 @@ class OpenAICompatibleConfig(StatelessLLMBaseConfig):
     organization_id: str | None = Field(None, alias="organization_id")
     project_id: str | None = Field(None, alias="project_id")
     temperature: float = Field(1.0, alias="temperature")
+    extra_body: dict | None = Field(None, alias="extra_body")
 
     _OPENAI_COMPATIBLE_DESCRIPTIONS: ClassVar[dict[str, Description]] = {
         "base_url": Description(en="Base URL for the API endpoint", zh="API的URL端点"),
@@ -78,6 +79,11 @@ class OpenAICompatibleConfig(StatelessLLMBaseConfig):
         "temperature": Description(
             en="What sampling temperature to use, between 0 and 2.",
             zh="使用的采样温度，介于 0 和 2 之间。",
+        ),
+        "extra_body": Description(
+            en="Extra provider-specific fields merged into the request body (Optional). "
+            "e.g. {reasoning: {enabled: false}} to disable thinking on OpenRouter.",
+            zh="合并到请求体中的额外字段（可选）。例如 OpenRouter 上用 {reasoning: {enabled: false}} 关闭思考。",
         ),
     }
 

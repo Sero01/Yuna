@@ -16,8 +16,10 @@ from .conversation_utils import (
 )
 from .types import WebSocketSend
 from .tts_manager import TTSTaskManager
+from .filler import create_filler_controller
 from ..chat_history_manager import store_message
 from ..service_context import ServiceContext
+from ..utils.latency_probe import probe  # LATENCY-PROBE (throwaway)
 
 # Import necessary types from agent outputs
 from ..agent.output_types import SentenceOutput, AudioOutput
@@ -49,16 +51,25 @@ async def process_single_conversation(
     # Create TTSTaskManager for this conversation
     tts_manager = TTSTaskManager()
     full_response = ""  # Initialize full_response here
+    # Fillers only on voice turns; text input already feels asynchronous.
+    filler = create_filler_controller(
+        context, websocket_send, is_voice_turn=isinstance(user_input, np.ndarray)
+    )
 
     try:
         # Send initial signals
         await send_conversation_start_signals(websocket_send)
         logger.info(f"New Conversation Chain {session_emoji} started!")
 
+        # After the start signals (they clear the frontend audio queue), before ASR.
+        await filler.start()
+        probe.mark("turn_setup")  # LATENCY-PROBE (throwaway)
+
         # Process user input
         input_text = await process_user_input(
             user_input, context.asr_engine, websocket_send
         )
+        probe.mark("asr_transcribe")  # LATENCY-PROBE (throwaway)
 
         # Create batch input
         batch_input = create_batch_input(
@@ -100,8 +111,12 @@ async def process_single_conversation(
                     logger.debug(f"Sending tool status update: {output_item}")
 
                     await websocket_send(json.dumps(output_item))
+                    await filler.on_tool_status(output_item)
 
                 elif isinstance(output_item, (SentenceOutput, AudioOutput)):
+                    # The real reply has started; no more fillers this turn.
+                    filler.stop()
+                    probe.mark("agent_first_sentence")  # LATENCY-PROBE (throwaway)
                     # Handle SentenceOutput or AudioOutput
                     response_part = await process_agent_output(
                         output=output_item,
@@ -166,10 +181,18 @@ async def process_single_conversation(
         logger.info(f"🤡👍 Conversation {session_emoji} cancelled because interrupted.")
         raise
     except Exception as e:
-        logger.error(f"Error in conversation chain: {e}")
-        await websocket_send(
-            json.dumps({"type": "error", "message": f"Conversation error: {str(e)}"})
-        )
+        # Log the type too: some failures (e.g. AssertionError) carry no message,
+        # which previously produced a bare "Error in conversation chain:" line.
+        logger.exception(f"Error in conversation chain: {type(e).__name__}: {e}")
+        try:
+            await websocket_send(
+                json.dumps({"type": "error", "message": f"Conversation error: {str(e)}"})
+            )
+        except Exception as send_error:
+            # The socket is often the thing that just broke; don't let reporting
+            # the failure replace it with a less useful one.
+            logger.warning(f"Could not report conversation error to client: {send_error}")
         raise
     finally:
+        filler.stop()
         cleanup_conversation(tts_manager, session_emoji)

@@ -128,5 +128,17 @@ class AgentFactory:
                 port=settings.get("port"),
             )
 
+        elif conversation_agent_choice == "realtime_agent":
+            from .agents.realtime.realtime_agent import RealtimeAgent
+
+            return RealtimeAgent.from_settings(
+                settings=agent_settings.get("realtime_agent") or {},
+                system_prompt=system_prompt,
+                live2d_model=live2d_model,
+                tts_preprocessor_config=tts_preprocessor_config,
+                tts_engine=kwargs.get("tts_engine"),
+                ai_name=kwargs.get("character_name") or "Yuna",
+            )
+
         else:
             raise ValueError(f"Unsupported agent type: {conversation_agent_choice}")

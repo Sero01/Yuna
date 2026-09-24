@@ -14,6 +14,9 @@ from .single_conversation import process_single_conversation
 from .conversation_utils import EMOJI_LIST
 from .types import GroupConversationState
 from prompts import prompt_loader
+from ..utils.latency_probe import probe  # LATENCY-PROBE (throwaway)
+
+TASK_RESULT_TURN = "task-result-turn"  # asyncio task name of announcement turns
 
 
 async def handle_conversation_trigger(
@@ -30,6 +33,7 @@ async def handle_conversation_trigger(
     broadcast_to_group: Callable,
 ) -> None:
     """Handle triggers that start a conversation"""
+    probe.start(msg_type)  # LATENCY-PROBE (throwaway)
     metadata = None
 
     if msg_type == "ai-speak-signal":
@@ -62,6 +66,10 @@ async def handle_conversation_trigger(
                 }
             )
         )
+    elif msg_type == "task-result":
+        # Internal trigger (never sent by the browser): finished background tasks to announce.
+        user_input = ""
+        metadata = {"task_result": True, "skip_memory": True, "skip_history": True}
     elif msg_type == "text-input":
         user_input = data.get("text", "")
     else:  # mic-audio-end
@@ -95,6 +103,18 @@ async def handle_conversation_trigger(
                 )
             )
     else:
+        # A task-result announcement can start while the user is mid-sentence (the
+        # server can't see speech start), so the user's next turn cuts it off.
+        running = current_conversation_tasks.get(client_uid)
+        if (
+            msg_type != "task-result"
+            and running is not None
+            and not running.done()
+            and running.get_name() == TASK_RESULT_TURN
+        ):
+            running.cancel()
+            logger.info("🛑 Task-result announcement cut off by a new user turn")
+
         # Use client_uid as task key for individual conversations
         current_conversation_tasks[client_uid] = asyncio.create_task(
             process_single_conversation(
@@ -105,7 +125,8 @@ async def handle_conversation_trigger(
                 images=images,
                 session_emoji=session_emoji,
                 metadata=metadata,
-            )
+            ),
+            name=TASK_RESULT_TURN if msg_type == "task-result" else None,
         )
 
 

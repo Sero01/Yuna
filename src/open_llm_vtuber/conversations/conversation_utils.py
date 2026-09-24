@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from typing import Optional, Union, Any, List, Dict
 import numpy as np
 import json
@@ -101,7 +102,9 @@ async def process_agent_output(
                 translate_engine,
             )
         elif isinstance(output, AudioOutput):
-            full_response = await handle_audio_output(output, websocket_send)
+            full_response = await handle_audio_output(
+                output, websocket_send, tts_manager
+            )
         else:
             logger.warning(f"Unknown output type: {type(output)}")
     except Exception as e:
@@ -150,11 +153,20 @@ async def handle_sentence_output(
 async def handle_audio_output(
     output: AudioOutput,
     websocket_send: WebSocketSend,
+    tts_manager: Optional[TTSTaskManager] = None,
 ) -> str:
-    """Process and send AudioOutput directly to the client"""
+    """Send AudioOutput to the client; through the TTS manager (ordered, awaited) if given"""
     full_response = ""
     async for audio_path, display_text, transcript, actions in output:
         full_response += transcript
+        if tts_manager is not None:
+            await tts_manager.play_file(
+                audio_path=audio_path,
+                display_text=display_text,
+                actions=actions,
+                websocket_send=websocket_send,
+            )
+            continue
         audio_payload = prepare_audio_payload(
             audio_path=audio_path,
             display_text=display_text,
@@ -185,7 +197,12 @@ async def process_user_input(
     """Process user input, converting audio to text if needed"""
     if isinstance(user_input, np.ndarray):
         logger.info("Transcribing audio input...")
+        started = time.perf_counter()
         input_text = await asr_engine.async_transcribe_np(user_input)
+        logger.info(
+            f"ASR: {len(user_input) / 16000:.1f}s of audio in "
+            f"{time.perf_counter() - started:.2f}s"
+        )
         await websocket_send(
             json.dumps({"type": "user-input-transcription", "text": input_text})
         )

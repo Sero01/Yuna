@@ -10,6 +10,7 @@ from ..agent.output_types import DisplayText, Actions
 from ..live2d_model import Live2dModel
 from ..tts.tts_interface import TTSInterface
 from ..utils.stream_audio import prepare_audio_payload
+from ..utils.latency_probe import probe  # LATENCY-PROBE (throwaway)
 from .types import WebSocketSend
 
 
@@ -65,6 +66,7 @@ class TTSTaskManager:
         logger.debug(
             f"🏃Queuing TTS task for: '''{tts_text}''' (by {display_text.name})"
         )
+        probe.mark("tts_task_queued")  # LATENCY-PROBE (throwaway)
 
         # Get current sequence number
         current_sequence = self._sequence_counter
@@ -89,6 +91,42 @@ class TTSTaskManager:
         )
         self.task_list.append(task)
 
+    async def play_file(
+        self,
+        audio_path: str,
+        display_text: DisplayText,
+        actions: Optional[Actions],
+        websocket_send: WebSocketSend,
+    ) -> None:
+        """Queue an already-rendered audio file in order with synthesized sentences.
+
+        Returns once the file has been read, so the caller may delete it.
+        """
+        current_sequence = self._sequence_counter
+        self._sequence_counter += 1
+
+        if not self._sender_task or self._sender_task.done():
+            self._sender_task = asyncio.create_task(
+                self._process_payload_queue(websocket_send)
+            )
+
+        try:
+            payload = await asyncio.to_thread(
+                prepare_audio_payload,
+                audio_path=audio_path,
+                display_text=display_text,
+                actions=actions,
+            )
+        except Exception as e:
+            logger.error(f"Error preparing audio payload for {audio_path}: {e}")
+            payload = prepare_audio_payload(
+                audio_path=None, display_text=display_text, actions=actions
+            )
+        # An entry in task_list makes finalize_conversation_turn wait for playback.
+        self.task_list.append(
+            asyncio.create_task(self._payload_queue.put((payload, current_sequence)))
+        )
+
     async def _process_payload_queue(self, websocket_send: WebSocketSend) -> None:
         """
         Process and send payloads in correct order.
@@ -106,6 +144,8 @@ class TTSTaskManager:
                 while self._next_sequence_to_send in buffered_payloads:
                     next_payload = buffered_payloads.pop(self._next_sequence_to_send)
                     await websocket_send(json.dumps(next_payload))
+                    probe.mark("first_audio_sent")  # LATENCY-PROBE (throwaway)
+                    probe.report()  # LATENCY-PROBE (throwaway)
                     self._next_sequence_to_send += 1
 
                 self._payload_queue.task_done()
@@ -137,14 +177,20 @@ class TTSTaskManager:
         sequence_number: int,
     ) -> None:
         """Process TTS generation and queue the result for ordered delivery"""
+        probe.mark("tts_task_started")  # LATENCY-PROBE (throwaway)
         audio_file_path = None
         try:
             audio_file_path = await self._generate_audio(tts_engine, tts_text)
-            payload = prepare_audio_payload(
+            probe.mark("tts_audio_generated")  # LATENCY-PROBE (throwaway)
+            # Decode + base64 + RMS is CPU work (and ffmpeg for mp3); keep it off
+            # the event loop so it can't stall other sends.
+            payload = await asyncio.to_thread(
+                prepare_audio_payload,
                 audio_path=audio_file_path,
                 display_text=display_text,
                 actions=actions,
             )
+            probe.mark("payload_prepared")  # LATENCY-PROBE (throwaway)
             # Queue the payload with its sequence number
             await self._payload_queue.put((payload, sequence_number))
 

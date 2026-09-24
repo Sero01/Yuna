@@ -2,11 +2,11 @@
     "mcp_servers": {
       "time": {
         "command": "uvx",
-        "args": ["mcp-server-time", "--local-timezone=Asia/Shanghai"]
+        "args": ["--from", "mcp-server-time", "python", "-m", "mcp_server_time", "--local-timezone=Asia/Kolkata"]
       },
       "ddg-search": {
         "command": "uvx",
-        "args": ["duckduckgo-mcp-server"]
+        "args": ["--from", "duckduckgo-mcp-server", "python", "-c", "from duckduckgo_mcp_server.server import main; main()"]
       }
     }
 }

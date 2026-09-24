@@ -23,6 +23,7 @@ from .tts.tts_factory import TTSFactory
 from .vad.vad_factory import VADFactory
 from .agent.agent_factory import AgentFactory
 from .translate.translate_factory import TranslateFactory
+from .conversations.filler import get_filler_library
 
 from .config_manager import (
     Config,
@@ -70,6 +71,8 @@ class ServiceContext:
         self.history_uid: str = ""  # Add history_uid field
 
         self.send_text: Callable = None
+        # Called by agents with background tasks when results are waiting (set per client).
+        self.task_listener: Callable[[], None] | None = None
         self.client_uid: str = None
 
     def __str__(self):
@@ -238,6 +241,9 @@ class ServiceContext:
         self.send_text = send_text
         self.client_uid = client_uid
 
+        # Server init runs in a different event loop; make sure fillers build in this one.
+        self.init_fillers(self.character_config)
+
         # Initialize session-specific MCP components
         await self._init_mcp_components(
             self.character_config.agent_config.agent_settings.basic_memory_agent.use_mcpp,
@@ -273,6 +279,9 @@ class ServiceContext:
 
         # init tts from character config
         self.init_tts(config.character_config.tts_config)
+
+        # start rendering filler clips in the background so they're ready by turn one
+        self.init_fillers(config.character_config)
 
         # init vad from character config
         self.init_vad(config.character_config.vad_config)
@@ -341,8 +350,22 @@ class ServiceContext:
             )
             # saving config should be done after successful initialization
             self.character_config.tts_config = tts_config
+            if self.agent_engine is not None and hasattr(
+                self.agent_engine, "set_tts_engine"
+            ):
+                self.agent_engine.set_tts_engine(self.tts_engine)
         else:
             logger.info("TTS already initialized with the same config.")
+
+    def init_fillers(self, character_config: CharacterConfig) -> None:
+        try:
+            get_filler_library(
+                character_config.filler_config,
+                character_config.tts_config,
+                self.tts_engine,
+            )
+        except Exception as e:
+            logger.warning(f"Could not start filler clip rendering: {e}")
 
     def init_vad(self, vad_config: VADConfig) -> None:
         if vad_config.vad_model is None:
@@ -379,6 +402,7 @@ class ServiceContext:
         avatar = self.character_config.avatar or ""  # Get avatar from config
 
         try:
+            previous_agent = self.agent_engine
             self.agent_engine = AgentFactory.create_agent(
                 conversation_agent_choice=agent_config.conversation_agent_choice,
                 agent_settings=agent_config.agent_settings.model_dump(),
@@ -391,7 +415,14 @@ class ServiceContext:
                 tool_manager=self.tool_manager,
                 tool_executor=self.tool_executor,
                 mcp_prompt_string=self.mcp_prompt,
+                tts_engine=self.tts_engine,
+                character_name=self.character_config.character_name,
             )
+            if self.task_listener is not None:
+                if hasattr(previous_agent, "remove_task_listener"):
+                    previous_agent.remove_task_listener(self.task_listener)
+                if hasattr(self.agent_engine, "set_task_listener"):
+                    self.agent_engine.set_task_listener(self.task_listener)
 
             logger.debug(f"Agent choice: {agent_config.conversation_agent_choice}")
             logger.debug(f"System prompt: {system_prompt}")

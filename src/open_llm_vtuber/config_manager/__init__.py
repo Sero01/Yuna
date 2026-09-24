@@ -43,12 +43,14 @@ from .vad import (
     SileroVADConfig,
 )
 from .tts_preprocessor import TTSPreprocessorConfig, TranslatorConfig, DeepLXConfig
+from .filler import FillerConfig
 from .i18n import I18nMixin, Description, MultiLingualString
 from .agent import (
     AgentConfig,
     AgentSettings,
     StatelessLLMConfigs,
     BasicMemoryAgentConfig,
+    RealtimeAgentConfig,
     Mem0Config,
     Mem0VectorStoreConfig,
     Mem0LLMConfig,
@@ -80,6 +82,7 @@ __all__ = [
     "AgentSettings",
     "StatelessLLMConfigs",
     "BasicMemoryAgentConfig",
+    "RealtimeAgentConfig",
     "Mem0Config",
     "Mem0VectorStoreConfig",
     "Mem0LLMConfig",
@@ -110,6 +113,7 @@ __all__ = [
     "SileroVADConfig",
     # TTS preprocessor related classes
     "TTSPreprocessorConfig",
+    "FillerConfig",
     "TranslatorConfig",
     "DeepLXConfig",
     # i18n related classes

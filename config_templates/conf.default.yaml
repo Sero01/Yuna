@@ -47,6 +47,7 @@ character_config:
   #  =================== LLM Backend Settings ===================
 
   agent_config:
+    # 'basic_memory_agent', 'mem0_agent', 'hume_ai_agent', 'letta_agent', 'realtime_agent'
     conversation_agent_choice: 'basic_memory_agent'
 
     agent_settings:
@@ -84,7 +85,43 @@ character_config:
         host: 'api.hume.ai' # Do not change this in most cases
         config_id: '' # Optional
         idle_timeout: 15 # How many seconds to wait before disconnecting
- 
+
+      realtime_agent:
+        # Low-latency agent: a fast "talker" LLM always answers, Jev (OpenRouter's decision
+        # model) decides whether a turn needs a background task, and hermes-agent runs those
+        # tasks. Finished results are spoken as soon as the conversation is quiet.
+        # Needs an OpenRouter key and a running hermes-agent API server.
+        openrouter_api_key: '' # falls back to the OPENROUTER_API_KEY environment variable
+        openrouter_base_url: 'https://openrouter.ai/api/v1'
+        talker_model: 'deepseek/deepseek-v4.1-flash'
+        talker_provider: '' # pin one OpenRouter provider (prompt caching is per provider); '' = fastest
+        talker_temperature: 0.8
+        talker_max_tokens: 200
+        hedge_after_s: 1.5 # send a backup request if no token arrives by then; 0 disables
+        jev_model: 'typesafe/jev-1.13'
+        jev_url: 'https://openrouter.ai/api/alpha/decisions'
+        jev_timeout_s: 1.5
+        jev_fallback_after_s: 0.6 # also ask the fallback router if Jev hasn't answered by then
+        unsure_low: 0.35 # between these task probabilities Yuna asks before starting a task
+        unsure_high: 0.65
+        fallback_router_model: 'meta-llama/llama-3.3-70b-instruct' # used if Jev fails; '' disables
+        fallback_router_provider: 'groq'
+        hermes_base_url: 'http://localhost:8642'
+        hermes_api_key: '' # hermes API_SERVER_KEY; falls back to the HERMES_API_KEY environment variable
+        task_timeout_s: 600
+        max_active_tasks: 3
+        soul_path: '' # persona file prepended to the system prompt, e.g. Hermes' SOUL.md
+        user_profile_path: '' # facts about the user, e.g. Hermes' memories/USER.md
+        max_turns: 8 # conversation exchanges sent to the talker
+        quiet_gap_s: 1.0 # silence before announcing finished tasks
+        prerender_acks: True # prepare "on it" acknowledgements as audio ahead of time
+        faster_first_response: True
+        segment_method: 'pysbd'
+        # Interjections the talker starts replies with, e.g. ['Hmm,', 'Oh?', 'Well,'].
+        # Each is pre-rendered, so it plays the moment it streams in. [] disables.
+        openers: []
+        opener_carrier: 'I suppose that makes sense.' # openers are cut out of this sentence for a natural pitch
+
       # MemGPT Configurations: MemGPT is temporarily removed
       ##
 
@@ -111,6 +148,7 @@ character_config:
         project_id: null
         model: 'qwen2.5:latest'
         temperature: 1.0 # value between 0 to 2
+        extra_body: null # extra provider-specific request fields, e.g. OpenRouter: {reasoning: {enabled: false}}
         interrupt_method: 'user'
         # This is the method to use for prompting the interruption signal. 
         # If the provider supports inserting system prompt anywhere in the chat memory, use 'system'. 
@@ -285,6 +323,7 @@ character_config:
       voice: 'en-US-AshleyNeural'
       pitch: '26' # percentage of the pitch adjustment
       rate: '1' # rate of speak
+      edge_fallback_voice: '' # edge-tts voice used while Azure fails or is rate-limited; '' disables
 
     bark_tts:
       voice: 'v2/en_speaker_1'
@@ -493,6 +532,21 @@ character_config:
         region: 'ap-guangzhou'
         source_lang: 'zh'
         target_lang: 'ja'
+
+  # =================== Filler Voices ===================
+  # Short pre-rendered sounds ("hmm", "okay") played the moment you stop speaking,
+  # while the real reply is still being generated. Voice turns only.
+  # Clips are rendered once with the TTS above and cached in cache/fillers/.
+  filler_config:
+    enabled: False
+    probability: 0.7 # chance (0-1) of an instant filler on a voice turn
+    no_repeat_window: 2 # recently played clips that won't be picked again
+    escalation_delay: 4.0 # seconds without a reply before one "still thinking" clip
+    max_tier0_ms: 900 # instant clips longer than this (ms) are dropped
+    # Keep instant phrases neutral: they play before we know what you said.
+    tier0_phrases: ['Hmm.', 'Okay.', 'Mmm.', 'Mmm...', 'Hmmm.', 'Hmm hmm.', 'Uh-huh.', 'Ah.', 'Oh.', 'Right.', 'I see.']
+    escalation_phrases: ['Hmm, give me a sec.', 'Hmm, let me think.', 'One moment.']
+    tool_phrases: ['Let me look that up.', 'Let me check.'] # played when a tool call starts (use_mcpp only)
 
 # Live Streaming Integration
 live_config:

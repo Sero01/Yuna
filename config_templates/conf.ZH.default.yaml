@@ -48,6 +48,7 @@ character_config:
   #  =================== LLM 后端设置 ===================
 
   agent_config:
+    # 可选：'basic_memory_agent', 'mem0_agent', 'hume_ai_agent', 'letta_agent', 'realtime_agent'
     conversation_agent_choice: 'basic_memory_agent' # 对话代理选择
 
     agent_settings:
@@ -74,6 +75,41 @@ character_config:
         host: 'api.hume.ai' # 一般无需更改
         config_id: '' # 可选
         idle_timeout: 15 # 空闲超时断开连接的秒数
+
+      realtime_agent:
+        # 低延迟代理：快速的对话模型始终负责回答，Jev（OpenRouter 的决策模型）判断本轮是否需要后台任务，
+        # 由 hermes-agent 执行这些任务。任务完成后，会在对话安静时立即播报结果。
+        # 需要 OpenRouter 密钥以及正在运行的 hermes-agent API 服务器。
+        openrouter_api_key: '' # 为空时读取环境变量 OPENROUTER_API_KEY
+        openrouter_base_url: 'https://openrouter.ai/api/v1'
+        talker_model: 'deepseek/deepseek-v4.1-flash'
+        talker_provider: '' # 固定一个 OpenRouter 提供商（提示词缓存按提供商区分）；留空 = 最快
+        talker_temperature: 0.8
+        talker_max_tokens: 200
+        hedge_after_s: 1.5 # 超过该秒数仍无输出时发送备用请求；0 表示关闭
+        jev_model: 'typesafe/jev-1.13'
+        jev_url: 'https://openrouter.ai/api/alpha/decisions'
+        jev_timeout_s: 1.5
+        jev_fallback_after_s: 0.6 # 超过该秒数 Jev 仍未回答时，同时询问备用路由
+        unsure_low: 0.35 # 任务概率处于此区间时，先询问用户是否需要执行
+        unsure_high: 0.65
+        fallback_router_model: 'meta-llama/llama-3.3-70b-instruct' # Jev 失败时使用；留空表示关闭
+        fallback_router_provider: 'groq'
+        hermes_base_url: 'http://localhost:8642'
+        hermes_api_key: '' # hermes 的 API_SERVER_KEY；为空时读取环境变量 HERMES_API_KEY
+        task_timeout_s: 600
+        max_active_tasks: 3
+        soul_path: '' # 添加到系统提示词开头的人设文件，例如 Hermes 的 SOUL.md
+        user_profile_path: '' # 关于用户的事实文件，例如 Hermes 的 memories/USER.md
+        max_turns: 8 # 发送给对话模型的对话轮数
+        quiet_gap_s: 1.0 # 播报已完成任务前需要的安静时间（秒）
+        prerender_acks: True # 提前生成“收到”确认语音
+        faster_first_response: True
+        segment_method: 'pysbd'
+        # 对话模型用于开头的语气词，例如 ['Hmm,', 'Oh?', 'Well,']。
+        # 每个都会预先生成音频，一出现就立即播放。[] 表示关闭。
+        openers: []
+        opener_carrier: 'I suppose that makes sense.' # 从这句话中截取语气词，音调更自然
 
       # MemGPT 配置：MemGPT 暂时被移除
       ##
@@ -110,6 +146,7 @@ character_config:
         project_id: null # 项目 ID
         model: 'qwen2.5:latest' # 使用的模型
         temperature: 1.0 # 温度，介于 0 到 2 之间
+        extra_body: null # 额外的请求体字段，例如 OpenRouter 关闭思考: {reasoning: {enabled: false}}
         interrupt_method: 'user'
         # 用于表示中断信号的方法(提示词模式)。
         # 如果LLM支持在聊天记忆中的任何位置插入系统提示词，请使用'system'。
@@ -293,6 +330,7 @@ character_config:
       voice: 'en-US-AshleyNeural' # 语音
       pitch: '26' # 音调调整百分比
       rate: '1' # 语速
+      edge_fallback_voice: '' # Azure 失败或被限流时使用的 edge-tts 语音；留空表示关闭
 
     bark_tts:
       voice: 'v2/en_speaker_1' # 语音
@@ -489,6 +527,20 @@ character_config:
         region: 'ap-guangzhou'
         source_lang: 'zh'
         target_lang: 'ja'
+
+  # =================== 语气词 ===================
+  # 用户停止说话后立即播放的简短预渲染语气词（如“嗯”），此时回复仍在生成中。仅用于语音输入。
+  # 语气词使用上面的 TTS 渲染一次，并缓存在 cache/fillers/ 中。
+  filler_config:
+    enabled: False
+    probability: 0.7 # 语音对话中播放即时语气词的概率（0-1）
+    no_repeat_window: 2 # 最近播放过、不会被再次选中的语气词数量
+    escalation_delay: 4.0 # 多少秒仍无回复时播放一次“还在想”语句
+    max_tier0_ms: 900 # 超过此时长（毫秒）的即时语气词将被丢弃
+    # 即时语气词应保持中性：播放时还不知道用户说了什么。
+    tier0_phrases: ['嗯。', '嗯嗯。', '好的。']
+    escalation_phrases: ['嗯，稍等一下。', '嗯，我想想。', '我还在想。']
+    tool_phrases: ['我查一下。', '让我看看。'] # 工具调用开始时播放（仅 use_mcpp）
 
 # 直播平台集成
 live_config:

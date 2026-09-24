@@ -76,8 +76,29 @@ def tts_filter(
             logger.critical(f"Text: {text}")
             logger.warning("Skipping...")
 
+    text = fix_pronunciation(text)
     logger.debug(f"Filtered text: {text}")
     return text
+
+
+# "Hmph" and its variants, which edge-tts reads out letter by letter (H-M-P-H).
+_SPELLED_OUT_HMPH = re.compile(r"\bh+m+p*[fh]+\b", re.IGNORECASE)
+
+
+def fix_pronunciation(text: str) -> str:
+    """
+    Respell words the TTS engine would spell out, so they are spoken as sounds.
+    "Hmph" becomes "Humph", which edge-tts says as one syllable.
+
+    Args:
+        text (str): The text to fix.
+
+    Returns:
+        str: The text with respelled words.
+    """
+    return _SPELLED_OUT_HMPH.sub(
+        lambda m: "Humph" if m.group()[0].isupper() else "humph", text
+    )
 
 
 def remove_special_characters(text: str) -> str:

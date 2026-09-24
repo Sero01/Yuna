@@ -27,6 +27,7 @@ from .conversations.conversation_handler import (
     handle_group_interrupt,
     handle_individual_interrupt,
 )
+from .conversations.task_announcer import TaskAnnouncer
 
 
 class MessageType(Enum):
@@ -69,6 +70,7 @@ class WebSocketHandler:
         self.current_conversation_tasks: Dict[str, Optional[asyncio.Task]] = {}
         self.default_context_cache = default_context_cache
         self.received_data_buffers: Dict[str, np.ndarray] = {}
+        self._task_announcers: Dict[str, TaskAnnouncer] = {}
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
@@ -122,6 +124,8 @@ class WebSocketHandler:
             await self._send_initial_messages(
                 websocket, client_uid, session_service_context
             )
+
+            self._attach_task_announcer(client_uid, session_service_context)
 
             logger.info(f"Connection established for client {client_uid}")
 
@@ -279,6 +283,7 @@ class WebSocketHandler:
 
     async def handle_disconnect(self, client_uid: str) -> None:
         """Handle client disconnection"""
+        self._detach_task_announcer(client_uid)
         group = self.chat_group_manager.get_client_group(client_uid)
         if group:
             await handle_group_interrupt(
@@ -317,6 +322,7 @@ class WebSocketHandler:
 
     async def _cleanup_failed_connection(self, client_uid: str) -> None:
         """Clean up failed connection data"""
+        self._detach_task_announcer(client_uid)
         self.client_connections.pop(client_uid, None)
         self.client_contexts.pop(client_uid, None)
         self.received_data_buffers.pop(client_uid, None)
@@ -329,6 +335,57 @@ class WebSocketHandler:
             self.current_conversation_tasks.pop(client_uid, None)
 
         message_handler.cleanup_client(client_uid)
+
+    def _attach_task_announcer(self, client_uid: str, context: ServiceContext) -> None:
+        """Let agents with background tasks start a turn when results arrive."""
+        announcer = TaskAnnouncer(
+            is_busy=lambda: self._conversation_running(client_uid),
+            start_turn=lambda: self._start_task_result_turn(client_uid),
+            quiet_gap_s=getattr(context.agent_engine, "quiet_gap_s", 1.0),
+        )
+        self._task_announcers[client_uid] = announcer
+        context.task_listener = announcer.notify
+        if hasattr(context.agent_engine, "set_task_listener"):
+            context.agent_engine.set_task_listener(announcer.notify)
+
+    def _detach_task_announcer(self, client_uid: str) -> None:
+        announcer = self._task_announcers.pop(client_uid, None)
+        if announcer is None:
+            return
+        announcer.close()
+        context = self.client_contexts.get(client_uid)
+        if context is not None:
+            context.task_listener = None
+            if hasattr(context.agent_engine, "remove_task_listener"):
+                context.agent_engine.remove_task_listener(announcer.notify)
+
+    def _conversation_running(self, client_uid: str) -> bool:
+        task = self.current_conversation_tasks.get(client_uid)
+        return task is not None and not task.done()
+
+    async def _start_task_result_turn(self, client_uid: str) -> None:
+        websocket = self.client_connections.get(client_uid)
+        context = self.client_contexts.get(client_uid)
+        if websocket is None or context is None:
+            return
+        if not getattr(context.agent_engine, "has_untold_results", lambda: False)():
+            return
+        group = self.chat_group_manager.get_client_group(client_uid)
+        if group and len(group.members) > 1:
+            return  # the real-time agent doesn't do group conversations
+        await handle_conversation_trigger(
+            msg_type="task-result",
+            data={},
+            client_uid=client_uid,
+            context=context,
+            websocket=websocket,
+            client_contexts=self.client_contexts,
+            client_connections=self.client_connections,
+            chat_group_manager=self.chat_group_manager,
+            received_data_buffers=self.received_data_buffers,
+            current_conversation_tasks=self.current_conversation_tasks,
+            broadcast_to_group=self.broadcast_to_group,
+        )
 
     async def broadcast_to_group(
         self, group_members: list[str], message: dict, exclude_uid: str = None

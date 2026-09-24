@@ -119,8 +119,13 @@ class AzureTTSConfig(I18nMixin):
     voice: str = Field(..., alias="voice")
     pitch: str = Field(..., alias="pitch")
     rate: str = Field(..., alias="rate")
+    edge_fallback_voice: str = Field("", alias="edge_fallback_voice")
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
+        "edge_fallback_voice": Description(
+            en="edge-tts voice used while Azure fails or is rate-limited ('' disables)",
+            zh="Azure 失败或被限流时使用的 edge-tts 语音（留空表示关闭）",
+        ),
         "api_key": Description(
             en="API key for Azure TTS service", zh="Azure TTS 服务的 API 密钥"
         ),

@@ -18,6 +18,7 @@ from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall
 from loguru import logger
 
 from .stateless_llm_interface import StatelessLLMInterface
+from ...utils.latency_probe import probe  # LATENCY-PROBE (throwaway)
 from ...mcpp.types import ToolCallObject
 
 
@@ -30,6 +31,7 @@ class AsyncLLM(StatelessLLMInterface):
         organization_id: str = "z",
         project_id: str = "z",
         temperature: float = 1.0,
+        extra_body: Dict[str, Any] | None = None,
     ):
         """
         Initializes an instance of the `AsyncLLM` class.
@@ -41,10 +43,12 @@ class AsyncLLM(StatelessLLMInterface):
         - project_id (str, optional): The project ID for the OpenAI API. Defaults to "z".
         - llm_api_key (str, optional): The API key for the OpenAI API. Defaults to "z".
         - temperature (float, optional): What sampling temperature to use, between 0 and 2. Defaults to 1.0.
+        - extra_body (dict, optional): Extra provider-specific fields merged into the request body. Defaults to None.
         """
         self.base_url = base_url
         self.model = model
         self.temperature = temperature
+        self.extra_body = extra_body
         self.client = AsyncOpenAI(
             base_url=base_url,
             organization=organization_id,
@@ -105,7 +109,9 @@ class AsyncLLM(StatelessLLMInterface):
                 stream=True,
                 temperature=self.temperature,
                 tools=available_tools,
+                extra_body=self.extra_body,
             )
+            probe.mark("llm_stream_open")  # LATENCY-PROBE (throwaway)
             logger.debug(
                 f"Tool Support: {self.support_tools}, Available tools: {available_tools}"
             )
@@ -178,6 +184,7 @@ class AsyncLLM(StatelessLLMInterface):
                             for tool_data in accumulated_tool_calls.values()
                         ]
 
+                        probe.mark("llm_first_tool_call")  # LATENCY-PROBE (throwaway)
                         yield complete_tool_calls
                         accumulated_tool_calls = {}  # Reset for potential future tool calls
 
@@ -187,6 +194,8 @@ class AsyncLLM(StatelessLLMInterface):
                     continue
                 elif chunk.choices[0].delta.content is None:
                     chunk.choices[0].delta.content = ""
+                if chunk.choices[0].delta.content:  # LATENCY-PROBE (throwaway)
+                    probe.mark("llm_first_token")
                 yield chunk.choices[0].delta.content
 
             # If stream ends while still in a tool call, make sure to yield the tool call

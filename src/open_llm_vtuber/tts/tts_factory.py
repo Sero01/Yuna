@@ -8,12 +8,18 @@ class TTSFactory:
         if engine_type == "azure_tts":
             from .azure_tts import TTSEngine as AzureTTSEngine
 
+            fallback = None
+            if kwargs.get("edge_fallback_voice"):
+                from .edge_tts import TTSEngine as EdgeTTSEngine
+
+                fallback = EdgeTTSEngine(kwargs["edge_fallback_voice"])
             return AzureTTSEngine(
                 kwargs.get("api_key"),
                 kwargs.get("region"),
                 kwargs.get("voice"),
                 kwargs.get("pitch"),
                 kwargs.get("rate"),
+                fallback=fallback,
             )
         elif engine_type == "bark_tts":
             from .bark_tts import TTSEngine as BarkTTSEngine

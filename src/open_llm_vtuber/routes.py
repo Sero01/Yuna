@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 from loguru import logger
 from .service_context import ServiceContext
 from .websocket_handler import WebSocketHandler
+from .utils.ws_send import SerializedWebSocket
 from .proxy_handler import ProxyHandler
 
 
@@ -31,6 +32,11 @@ def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
         """WebSocket endpoint for client connections"""
         await websocket.accept()
         client_uid = str(uuid4())
+
+        # Several tasks write this socket concurrently during a turn (TTS payload
+        # sender, conversation coroutine, heartbeats). Serialize them here so no
+        # call site downstream has to remember to.
+        websocket = SerializedWebSocket(websocket)
 
         try:
             await ws_handler.handle_new_connection(websocket, client_uid)
