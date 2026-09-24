@@ -47,7 +47,7 @@ class TTSTaskManager:
             tts_engine: TTS engine instance
             websocket_send: WebSocket send function
         """
-        if len(re.sub(r'[\s.,!?，。！？\'"』」）】\s]+', "", tts_text)) == 0:
+        if len(re.sub(r'[\s.,!?;:—，。！？\'"』」）】\s]+', "", tts_text)) == 0:
             logger.debug("Empty TTS text, sending silent display payload")
             # Get current sequence number for silent payload
             current_sequence = self._sequence_counter

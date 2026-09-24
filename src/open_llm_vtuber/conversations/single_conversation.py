@@ -11,6 +11,7 @@ from .conversation_utils import (
     process_user_input,
     finalize_conversation_turn,
     cleanup_conversation,
+    join_reply_text,
     EMOJI_LIST,
 )
 from .types import WebSocketSend
@@ -115,7 +116,7 @@ async def process_single_conversation(
                     response_part_str = (
                         str(response_part) if response_part is not None else ""
                     )
-                    full_response += response_part_str  # Accumulate text response
+                    full_response = join_reply_text(full_response, response_part_str)
                 else:
                     logger.warning(
                         f"Received unexpected item type from agent chat stream: {type(output_item)}"

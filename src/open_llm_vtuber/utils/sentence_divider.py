@@ -25,7 +25,17 @@ COMMAS = [
     "﹑",
     "､",
     "،",
+    # Not commas, but clause breaks worth ending the fast first chunk on. A colon
+    # counts only before a space, so "3:30" and "https://" stay whole.
+    "—",
+    ": ",
 ]
+
+# A "," after a digit counts only before a non-digit, so "1,000" and "3,5" stay whole;
+# at the end of the text it waits for the next character.
+_COMMA_PATTERN = re.compile(
+    "|".join(r"(?<!\d),|,(?=\D)" if c == "," else re.escape(c) for c in COMMAS)
+)
 
 END_PUNCTUATIONS = [".", "!", "?", "。", "！", "？", "...", "。。。"]
 ABBREVIATIONS = [
@@ -116,12 +126,12 @@ def contains_comma(text: str) -> bool:
     Returns:
         bool: Whether the text contains a comma
     """
-    return any(comma in text for comma in COMMAS)
+    return _COMMA_PATTERN.search(text) is not None
 
 
 def comma_splitter(text: str) -> Tuple[str, str]:
     """
-    Process text and split it at the first comma.
+    Process text and split it at the earliest comma.
     Returns the split text (including the comma) and the remaining text.
 
     Args:
@@ -133,12 +143,10 @@ def comma_splitter(text: str) -> Tuple[str, str]:
     if not text:
         return [], ""
 
-    for comma in COMMAS:
-        if comma in text:
-            split_text = text.split(comma, 1)
-            # Return first part with the comma
-            return split_text[0].strip() + comma, split_text[1].strip()
-    return text, ""
+    match = _COMMA_PATTERN.search(text)
+    if not match:
+        return text, ""
+    return text[: match.end()].strip(), text[match.end() :].strip()
 
 
 def has_punctuation(text: str) -> bool:

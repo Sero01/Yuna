@@ -13,6 +13,7 @@ from .conversation_utils import (
     process_user_input,
     finalize_conversation_turn,
     cleanup_conversation,
+    join_reply_text,
     EMOJI_LIST,
 )
 from .types import (
@@ -377,7 +378,7 @@ async def process_member_response(
                     tts_manager=tts_manager,
                     translate_engine=context.translate_engine,
                 )
-                full_response += response_part  # Accumulate text response
+                full_response = join_reply_text(full_response, response_part)
             else:
                 logger.warning(
                     f"Received unexpected item type from agent chat stream: {type(output_item)}"

@@ -42,6 +42,40 @@ def create_batch_input(
     )
 
 
+# Scripts written without spaces between sentences. Hangul is spaced, so it is not here.
+_UNSPACED_SCRIPT_RANGES = [
+    (0x0E00, 0x0E7F),  # Thai
+    (0x3000, 0x30FF),  # CJK punctuation, hiragana, katakana
+    (0x3400, 0x4DBF),  # CJK ideographs, extension A
+    (0x4E00, 0x9FFF),  # CJK ideographs
+    (0xF900, 0xFAFF),  # CJK compatibility ideographs
+    (0xFF00, 0xFFEF),  # fullwidth forms
+]
+
+
+def _is_unspaced_script(char: str) -> bool:
+    return any(lo <= ord(char) <= hi for lo, hi in _UNSPACED_SCRIPT_RANGES)
+
+
+def join_reply_text(so_far: str, part: str) -> str:
+    """Append a sentence to the reply text. The sentence divider strips the space
+    between sentences, so put one back, except in unspaced scripts and just inside
+    the parentheses a think block is shown in."""
+    if not so_far or not part:
+        return so_far + part
+    last, first = so_far[-1], part[0]
+    if (
+        last.isspace()
+        or first.isspace()
+        or last == "("
+        or first == ")"
+        or _is_unspaced_script(last)
+        or _is_unspaced_script(first)
+    ):
+        return so_far + part
+    return f"{so_far} {part}"
+
+
 async def process_agent_output(
     output: Union[AudioOutput, SentenceOutput],
     character_config: Any,
