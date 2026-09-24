@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="270" viewBox="-10 -10 920 270" role="img" aria-label="Timeline in seconds after ASR text is ready. Jev routes at 0.37 s median, slowest seen 0.61 s. The talker's first speakable clause arrives at 0.62 s median. The opener clip starts between 0.40 and 0.62 s. The backup talker provider is only tried at 1.5 s.">
+<style>
+svg{--surface:#FFFFFF;--surface-2:#E9EBF1;--ink:#1A1F2B;--ink-2:#7A8294;--muted:#5D6474;--line:#CDD2DC;--grid:#E1E4EB;--rose:#C23B6E;--rose-soft:#EBB3C8;--teal:#0E7F86}
+@media (prefers-color-scheme: dark){svg{--surface:#1A1E27;--surface-2:#232834;--ink:#E7E9EF;--ink-2:#8C94A5;--muted:#9AA1B0;--line:#363C4A;--grid:#252A35;--rose:#F07AA3;--rose-soft:#7A3C55;--teal:#45C2C8}}
+.bg{fill:var(--surface);stroke:var(--line);stroke-width:1}
+text{fill:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Helvetica,Arial,sans-serif}
+.t{font-size:13px;font-weight:600}
+.s{font-size:11px;fill:var(--muted)}
+.m{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:11px;fill:var(--ink)}
+.box{fill:var(--surface);stroke:var(--line);stroke-width:1.25}
+.box.hinge{stroke:var(--ink);stroke-width:1.75}
+.box.ext{fill:var(--surface-2)}
+.box.slow{stroke-dasharray:5 4}
+.ln{fill:none;stroke:var(--ink);stroke-width:1.5}
+.ln.rt{stroke:var(--rose)}
+.ln.tk{stroke:var(--teal)}
+.ln.dash{stroke-dasharray:5 4}
+.ah{fill:var(--ink)}
+.ah.rt{fill:var(--rose)}
+.ah.tk{fill:var(--teal)}
+.lbl{font-size:11px;fill:var(--muted)}
+.lbl.rt{fill:var(--rose)}
+.lbl.tk{fill:var(--teal)}
+.grid{stroke:var(--grid);stroke-width:1}
+.bar-route{fill:var(--ink-2)}
+.bar-talk{fill:var(--rose)}
+.bar-open{fill:var(--rose-soft)}
+.tick{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;fill:var(--muted)}
+</style>
+<rect class="bg" x="-9.5" y="-9.5" width="919" height="269" rx="8"/>
+
+          <!-- grid: x = 170 + 420 * seconds -->
+          <line class="grid" x1="170" y1="44" x2="170" y2="204"/>
+          <line class="grid" x1="254" y1="44" x2="254" y2="204"/>
+          <line class="grid" x1="338" y1="44" x2="338" y2="204"/>
+          <line class="grid" x1="422" y1="44" x2="422" y2="204"/>
+          <line class="grid" x1="506" y1="44" x2="506" y2="204"/>
+          <line class="grid" x1="590" y1="44" x2="590" y2="204"/>
+          <line class="grid" x1="674" y1="44" x2="674" y2="204"/>
+          <line class="grid" x1="758" y1="44" x2="758" y2="204"/>
+          <line class="grid" x1="842" y1="44" x2="842" y2="204"/>
+          <text class="tick" x="170" y="222" text-anchor="middle">0</text>
+          <text class="tick" x="254" y="222" text-anchor="middle">0.2</text>
+          <text class="tick" x="338" y="222" text-anchor="middle">0.4</text>
+          <text class="tick" x="422" y="222" text-anchor="middle">0.6</text>
+          <text class="tick" x="506" y="222" text-anchor="middle">0.8</text>
+          <text class="tick" x="590" y="222" text-anchor="middle">1.0</text>
+          <text class="tick" x="674" y="222" text-anchor="middle">1.2</text>
+          <text class="tick" x="758" y="222" text-anchor="middle">1.4</text>
+          <text class="tick" x="842" y="222" text-anchor="middle">1.6</text>
+          <text class="lbl" x="506" y="243" text-anchor="middle">seconds after the ASR text is ready</text>
+
+          <text class="t" x="20" y="67">Jev router</text>
+          <text class="t" x="20" y="127">Talker</text>
+          <text class="t" x="20" y="187">Opener clip</text>
+
+          <!-- Jev: p50 0.37, slowest success 0.61 -->
+          <rect class="bar-route" x="170" y="54" width="155.4" height="18" rx="2"/>
+          <line class="ln" x1="325.4" y1="63" x2="426.2" y2="63"/>
+          <line class="ln" x1="426.2" y1="57" x2="426.2" y2="69"/>
+          <text class="lbl" x="436" y="67">median 0.37 s · slowest seen 0.61 s</text>
+
+          <!-- Talker: p50 first clause 0.62, hedge at 1.5 -->
+          <rect class="bar-talk" x="170" y="114" width="260.4" height="18" rx="2"/>
+          <text class="lbl" x="440" y="127">first speakable clause, median 0.62 s</text>
+          <line class="ln rt dash" x1="800" y1="106" x2="800" y2="140"/>
+          <text class="lbl rt" x="806" y="127">backup 1.5 s</text>
+
+          <!-- opener: 0.40 to 0.62 -->
+          <rect class="bar-open" x="338" y="174" width="92.4" height="18" rx="2"/>
+          <text class="lbl" x="440" y="187">starts playing 0.40–0.62 s</text>
+
+          <!-- route known -->
+          <line class="ln dash" x1="325.4" y1="40" x2="325.4" y2="204"/>
+          <text class="lbl" x="331" y="34">route known</text>
+        
+</svg>

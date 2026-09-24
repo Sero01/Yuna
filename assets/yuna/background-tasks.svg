@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1220" height="320" viewBox="-10 -10 1220 320" role="img" aria-label="The task manager starts, steers and stops Hermes runs and receives their events. When a run finishes it notifies the task announcer, which waits for a quiet gap and starts a task-result turn; the talker reads the result and the avatar speaks it. Every turn, the task manager's status lines are added to the talker prompt.">
+<style>
+svg{--surface:#FFFFFF;--surface-2:#E9EBF1;--ink:#1A1F2B;--ink-2:#7A8294;--muted:#5D6474;--line:#CDD2DC;--grid:#E1E4EB;--rose:#C23B6E;--rose-soft:#EBB3C8;--teal:#0E7F86}
+@media (prefers-color-scheme: dark){svg{--surface:#1A1E27;--surface-2:#232834;--ink:#E7E9EF;--ink-2:#8C94A5;--muted:#9AA1B0;--line:#363C4A;--grid:#252A35;--rose:#F07AA3;--rose-soft:#7A3C55;--teal:#45C2C8}}
+.bg{fill:var(--surface);stroke:var(--line);stroke-width:1}
+text{fill:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Helvetica,Arial,sans-serif}
+.t{font-size:13px;font-weight:600}
+.s{font-size:11px;fill:var(--muted)}
+.m{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:11px;fill:var(--ink)}
+.box{fill:var(--surface);stroke:var(--line);stroke-width:1.25}
+.box.hinge{stroke:var(--ink);stroke-width:1.75}
+.box.ext{fill:var(--surface-2)}
+.box.slow{stroke-dasharray:5 4}
+.ln{fill:none;stroke:var(--ink);stroke-width:1.5}
+.ln.rt{stroke:var(--rose)}
+.ln.tk{stroke:var(--teal)}
+.ln.dash{stroke-dasharray:5 4}
+.ah{fill:var(--ink)}
+.ah.rt{fill:var(--rose)}
+.ah.tk{fill:var(--teal)}
+.lbl{font-size:11px;fill:var(--muted)}
+.lbl.rt{fill:var(--rose)}
+.lbl.tk{fill:var(--teal)}
+.grid{stroke:var(--grid);stroke-width:1}
+.bar-route{fill:var(--ink-2)}
+.bar-talk{fill:var(--rose)}
+.bar-open{fill:var(--rose-soft)}
+.tick{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;fill:var(--muted)}
+</style>
+<rect class="bg" x="-9.5" y="-9.5" width="1219" height="319" rx="8"/>
+
+          <defs>
+            <marker id="f2-rt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah rt" d="M0 0L10 5L0 10z"/></marker>
+            <marker id="f2-tk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah tk" d="M0 0L10 5L0 10z"/></marker>
+          </defs>
+
+          <rect class="box ext" x="20" y="40" width="160" height="64" rx="6"/>
+          <text class="t" x="100" y="67" text-anchor="middle">Hermes agent</text>
+          <text class="s" x="100" y="85" text-anchor="middle">does the actual work</text>
+
+          <rect class="box" x="290" y="40" width="190" height="64" rx="6"/>
+          <text class="t" x="385" y="67" text-anchor="middle">Task manager</text>
+          <text class="s" x="385" y="85" text-anchor="middle">one watcher per run</text>
+
+          <path class="ln tk" d="M290 62 H182" marker-end="url(#f2-tk)"/>
+          <text class="lbl tk" x="235" y="30" text-anchor="middle">start · steer · stop · approve</text>
+          <path class="ln tk" d="M180 86 H288" marker-end="url(#f2-tk)"/>
+          <text class="lbl tk" x="235" y="101" text-anchor="middle">events or polling</text>
+
+          <rect class="box" x="590" y="40" width="190" height="64" rx="6"/>
+          <text class="t" x="685" y="67" text-anchor="middle">Task announcer</text>
+          <text class="s" x="685" y="85" text-anchor="middle">waits for idle + 1.0 s quiet</text>
+          <path class="ln tk" d="M480 72 H588" marker-end="url(#f2-tk)"/>
+          <text class="lbl tk" x="534" y="64" text-anchor="middle">finished or paused</text>
+
+          <rect class="box" x="890" y="40" width="160" height="64" rx="6"/>
+          <text class="t" x="970" y="67" text-anchor="middle">Talker</text>
+          <text class="s" x="970" y="85" text-anchor="middle">results or a yes/no ask</text>
+          <path class="ln rt" d="M780 72 H888" marker-end="url(#f2-rt)"/>
+          <text class="lbl rt" x="834" y="64" text-anchor="middle">task-result turn</text>
+
+          <rect class="box ext" x="1090" y="40" width="90" height="64" rx="6"/>
+          <text class="t" x="1135" y="67" text-anchor="middle">Avatar</text>
+          <text class="s" x="1135" y="85" text-anchor="middle">speaks it</text>
+          <path class="ln rt" d="M1050 72 H1088" marker-end="url(#f2-rt)"/>
+
+          <rect class="box" x="290" y="180" width="490" height="96" rx="6"/>
+          <text class="t" x="306" y="204">Task state message</text>
+          <text class="s" x="306" y="221">added to every talker prompt and to Jev's active_tasks (example lines)</text>
+          <text class="m" x="306" y="244">t1 [running 42s, last step: web_search] find a quiet cafe</text>
+          <text class="m" x="306" y="262">t2 [done 3m ago] check tomorrow's weather -&gt; light rain</text>
+          <path class="ln tk" d="M385 104 V178" marker-end="url(#f2-tk)"/>
+          <text class="lbl tk" x="393" y="146">every turn</text>
+          <path class="ln tk" d="M780 228 H970 V106" marker-end="url(#f2-tk)"/>
+          <text class="lbl tk" x="790" y="220">in the prompt</text>
+        
+</svg>

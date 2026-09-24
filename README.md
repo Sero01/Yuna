@@ -1,158 +1,138 @@
-![](./assets/banner.jpg)
+<h1 align="center">Yuna</h1>
 
-<h1 align="center">Open-LLM-VTuber</h1>
-<h3 align="center">
+<p align="center">
+A voice AI companion with a Live2D avatar that answers fast and can also do things for you.<br>
+Built on <a href="https://github.com/Open-LLM-VTuber/Open-LLM-VTuber">Open-LLM-VTuber</a>.
+</p>
 
-[![GitHub release](https://img.shields.io/github/v/release/Open-LLM-VTuber/Open-LLM-VTuber)](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber/releases) 
-[![license](https://img.shields.io/github/license/Open-LLM-VTuber/Open-LLM-VTuber)](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber/blob/master/LICENSE) 
-[![CodeQL](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber/actions/workflows/codeql.yml/badge.svg)](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber/actions/workflows/codeql.yml)
-[![Ruff](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber/actions/workflows/ruff.yml/badge.svg)](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber/actions/workflows/ruff.yml)
-[![Docker](https://img.shields.io/badge/Open-LLM-VTuber%2FOpen--LLM--VTuber-%25230db7ed.svg?logo=docker&logoColor=blue&labelColor=white&color=blue)](https://hub.docker.com/r/Open-LLM-VTuber/open-llm-vtuber) 
-[![QQ User Group](https://img.shields.io/badge/QQ_User_Group-792615362-white?style=flat&logo=qq&logoColor=white)](https://qm.qq.com/q/ngvNUQpuKI)
-[![Static Badge](https://img.shields.io/badge/Join%20Chat-Zulip?style=flat&logo=zulip&label=Zulip(dev-community)&color=blue&link=https%3A%2F%2Folv.zulipchat.com)](https://olv.zulipchat.com)
+Yuna starts talking with a fast model while a router decides, at the same moment, whether you are chatting or asking her to do something. Jobs go to a [Hermes agent](https://github.com/NousResearch/hermes-agent) in the background, and she reads out the result once the conversation goes quiet. You can keep talking to her while tasks run, check on them, change them, cancel them, or approve a command out loud.
 
-> **📢 v2.0 Development**: We are focusing on Open-LLM-VTuber v2.0 — a complete rewrite of the codebase. v2.0 is currently in its early discussion and planning phase. We kindly ask you to refrain from opening new issues or pull requests for feature requests on v1. To participate in the v2 discussions or contribute, join our developer community on [Zulip](https://olv.zulipchat.com). Weekly meeting schedules will be announced on Zulip. We will continue fixing bugs for v1 and work through existing pull requests.
+## What's different from Open-LLM-VTuber
 
-[![BuyMeACoffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/yi.ting)
-[![](https://dcbadge.limes.pink/api/server/3UDA8YFDXx)](https://discord.gg/3UDA8YFDXx)
+- **Real-time agent** (`realtime_agent`): a fast talker model always answers, and Jev, OpenRouter's decision model, routes each turn to chat or to a background task.
+- **Background tasks**: Hermes runs start, steer, stop and ask for permission by voice, and finished results are announced when you stop talking.
+- **Low first-audio latency**: pre-rendered acknowledgements and openers ("Hmph,", "Oh?", "Well,"), a backup provider if the talker is slow to start, and a shorter first sentence.
+- **Filler voices**: optional short "hmm" or "okay" clips play the moment you stop speaking, while the reply is still being generated.
+- **Azure TTS over REST** with an edge-tts fallback voice when Azure fails or is rate-limited, plus pronunciation fixes.
+- **Fixes**: spaces kept in saved replies, TTS kept off the event loop, and websocket sends that are safe to run concurrently.
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Open-LLM-VTuber/Open-LLM-VTuber)
+Everything else from Open-LLM-VTuber still works: other agents and LLMs, ASR and TTS backends, the web and desktop clients, Live2D expressions and chat history.
 
-ENGLISH README | [中文 README](./README.CN.md) | [한국어 README](./README.KR.md) | [日本語 README](./README.JP.md)
+## How one turn works
 
-[Documentation](https://open-llm-vtuber.github.io/docs/quick-start) | [![Roadmap](https://img.shields.io/badge/Roadmap-GitHub_Project-yellow)](https://github.com/orgs/Open-LLM-VTuber/projects/2)
+Your words go to the talker and to Jev at the same time. The talker's reply streams into a holding buffer. When Jev says "chat", the buffer is released and spoken. When Jev says "task", the buffer is thrown away, a Hermes run starts, and Yuna plays a short acknowledgement that was rendered in advance.
 
-<a href="https://trendshift.io/repositories/27063" target="_blank"><img src="https://trendshift.io/api/badge/repositories/27063" alt="Open-LLM-VTuber%2FOpen-LLM-VTuber | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+![One turn: speech goes to the talker and the Jev router at once; the held reply is spoken on chat or dropped for a task, which starts a Hermes run](assets/yuna/one-turn.svg)
 
-</h3>
+The talker is never blocked on routing. It has been streaming for the whole time Jev was deciding, so a chat turn loses nothing by waiting for the route.
 
+### What each route does
 
-> 常见问题 Common Issues doc (Written in Chinese): https://docs.qq.com/pdf/DTFZGQXdTUXhIYWRq
->
-> User Survey: https://forms.gle/w6Y6PiHTZr1nzbtWA
->
-> 调查问卷(中文): https://wj.qq.com/s2/16150415/f50a/
+Unsure, change, cancel and approval turns get a short talker reply (at most 80 tokens) steered by a system instruction placed after your message.
 
+| Route | Held reply | What Yuna says | What happens to work |
+| --- | --- | --- | --- |
+| chat | spoken | The talker's reply as it streamed | Nothing |
+| follow-up · status | spoken | The talker's reply; task state is already in its prompt | Result marked as told |
+| new task | dropped | A pre-rendered acknowledgement | `POST /v1/runs` to Hermes |
+| follow-up · change | dropped | Short reply confirming the change | Steer the run; if Hermes refuses, stop it and start again with the update |
+| follow-up · cancel | dropped | Short reply confirming the stop | `POST /v1/runs/{id}/stop` |
+| unsure | dropped | Asks whether you want it done | Your request is saved as a pending offer |
+| accept offer | dropped | A pre-rendered acknowledgement | Starts the saved request plus what you just said |
+| approval | dropped | Short reply confirming yes or no | `POST /v1/runs/{id}/approval` with `once` or `deny`. A yes needs Jev at 0.8 or higher; a no counts at any confidence |
 
+### Background tasks
 
-> :warning: This project is in its early stages and is currently under **active development**.
+Each Hermes run has a watcher that follows its event stream and falls back to polling. Running and finished tasks become one-line entries in every talker prompt and in Jev's view of active tasks. When a run finishes, the task announcer waits until no turn is running and nothing has happened for a second, then starts a turn that reads the result aloud. A run that pauses for permission goes through the same announcer, and Yuna asks you out loud; your next turn answers it.
 
-> :warning: If you want to run the server remotely and access it on a different machine, such as running the server on your computer and access it on your phone, you will need to configure `https`, because the microphone on the front end will only launch in a secure context (a.k.a. https or localhost). See [MDN Web Doc](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia). Therefore, you should configure https with a reverse proxy to access the page on a remote machine (non-localhost).
+![Background tasks: the task manager drives Hermes runs, the announcer waits for quiet, and the talker reads the result](assets/yuna/background-tasks.svg)
 
+Results that finish while no client is connected are announced when one connects.
 
+### Why routing costs nothing on chat turns
 
-## ⭐️ What is this project?
+Jev's typical answer arrives before the talker's first speakable clause.
 
+![Timing of a chat turn: Jev routes at 0.37 s median, the talker's first clause arrives at 0.62 s median, and the opener clip starts between 0.40 and 0.62 s](assets/yuna/chat-timing.svg)
 
-**Open-LLM-VTuber** is a unique **voice-interactive AI companion** that not only supports **real-time voice conversations**  and **visual perception** but also features a lively **Live2D avatar**. All functionalities can run completely offline on your computer!
+Medians from a latency benchmark, with the opener range from live turns. End to end, first audio was about 2.0 s median with edge-tts, which took 0.7–1.2 s of that.
 
-You can treat it as your personal AI companion — whether you want a `virtual girlfriend`, `boyfriend`, `cute pet`, or any other character, it can meet your expectations. The project fully supports `Windows`, `macOS`, and `Linux`, and offers two usage modes: web version and desktop client (with special support for **transparent background desktop pet mode**, allowing the AI companion to accompany you anywhere on your screen).
+## Quick start
 
-Although the long-term memory feature is temporarily removed (coming back soon), thanks to the persistent storage of chat logs, you can always continue your previous unfinished conversations without losing any precious interactive moments.
+You need [uv](https://docs.astral.sh/uv/), an [OpenRouter](https://openrouter.ai) API key, and a running [hermes-agent](https://github.com/NousResearch/hermes-agent) API server for background tasks.
 
-In terms of backend support, we have integrated a rich variety of LLM inference, text-to-speech, and speech recognition solutions. If you want to customize your AI companion, you can refer to the [Character Customization Guide](https://open-llm-vtuber.github.io/docs/user-guide/live2d) to customize your AI companion's appearance and persona.
+```bash
+git clone --recursive https://github.com/Sero01/Yuna.git
+cd Yuna
+uv sync
+cp config_templates/conf.default.yaml conf.yaml
+```
 
-The reason it's called `Open-LLM-Vtuber` instead of `Open-LLM-Companion` or `Open-LLM-Waifu` is because the project's initial development goal was to use open-source solutions that can run offline on platforms other than Windows to recreate the closed-source AI Vtuber `neuro-sama`.
+In `conf.yaml`:
 
-### 👀 Demo
-| ![](assets/i1.jpg) | ![](assets/i2.jpg) |
-|:---:|:---:|
-| ![](assets/i3.jpg) | ![](assets/i4.jpg) |
+1. Set `conversation_agent_choice: 'realtime_agent'`.
+2. Provide your keys, either in `agent_settings.realtime_agent` or as the `OPENROUTER_API_KEY` and `HERMES_API_KEY` environment variables. `HERMES_API_KEY` is Hermes' `API_SERVER_KEY`.
+3. Optional: point `soul_path` at a persona file (for example Hermes' `SOUL.md`) and `user_profile_path` at facts about you (for example `memories/USER.md`).
+4. Optional: switch `tts_model` to `azure_tts` and set `edge_fallback_voice`, add `openers`, or turn on `filler_config.enabled`.
 
+Then start the server and open http://localhost:12393:
 
-## ✨ Features & Highlights
+```bash
+uv run run_server.py
+```
 
-- 🖥️ **Cross-platform support**: Perfect compatibility with macOS, Linux, and Windows. We support NVIDIA and non-NVIDIA GPUs, with options to run on CPU or use cloud APIs for resource-intensive tasks. Some components support GPU acceleration on macOS.
+For ASR, TTS, Live2D models and the desktop client, the [Open-LLM-VTuber docs](https://open-llm-vtuber.github.io/docs/quick-start) still apply.
 
-- 🔒 **Offline mode support**: Run completely offline using local models - no internet required. Your conversations stay on your device, ensuring privacy and security.
+## Settings
 
-- 💻 **Attractive and powerful web and desktop clients**: Offers both web version and desktop client usage modes, supporting rich interactive features and personalization settings. The desktop client can switch freely between window mode and desktop pet mode, allowing the AI companion to be by your side at all times.
+Everything lives under `character_config.agent_config.agent_settings.realtime_agent` in `conf.yaml`. Set `conversation_agent_choice` back to `basic_memory_agent` to use a single LLM instead.
 
-- 🎯 **Advanced interaction features**:
-  - 👁️ Visual perception, supporting camera, screen recording and screenshots, allowing your AI companion to see you and your screen
-  - 🎤 Voice interruption without headphones (AI won't hear its own voice)
-  - 🫱 Touch feedback, interact with your AI companion through clicks or drags
-  - 😊 Live2D expressions, set emotion mapping to control model expressions from the backend
-  - 🐱 Pet mode, supporting transparent background, global top-most, and mouse click-through - drag your AI companion anywhere on the screen
-  - 💭 Display AI's inner thoughts, allowing you to see AI's expressions, thoughts and actions without them being spoken
-  - 🗣️ AI proactive speaking feature
-  - 💾 Chat log persistence, switch to previous conversations anytime
-  - 🌍 TTS translation support (e.g., chat in Chinese while AI uses Japanese voice)
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `talker_model` | `deepseek/deepseek-v4.1-flash` | The model that always answers. Temperature 0.8, 200 tokens max |
+| `talker_provider` | `''` | Pin one OpenRouter provider (prompt caching is per provider); empty means fastest |
+| `hedge_after_s` | `1.5` | Starts a second request on a different provider if no token has arrived |
+| `jev_model` | `typesafe/jev-1.13` | Called through OpenRouter's alpha decisions endpoint |
+| `jev_fallback_after_s` | `0.6` | Races the Groq fallback router; the first usable answer wins, Jev on a tie |
+| `jev_timeout_s` | `1.5` | Jev is abandoned after this; with no answer at all, the turn is treated as chat |
+| `unsure_low` / `unsure_high` | `0.35` / `0.65` | Task probability band where Yuna asks instead of acting |
+| `max_active_tasks` | `3` | Concurrent Hermes runs; `task_timeout_s` is 600 |
+| `max_turns` | `8` | Exchanges of history in the talker prompt |
+| `quiet_gap_s` | `1.0` | Silence required before a result is announced |
+| `openers` | `[]` | Interjections like `'Hmph,'`, `'Oh?'`, `'Well,'`, each cut from a carrier sentence and cached as a clip |
+| `prerender_acks` | `True` | Acknowledgements are generated and synthesized before they are needed |
 
-- 🧠 **Extensive model support**:
-  - 🤖 Large Language Models (LLM): Ollama, OpenAI (and any OpenAI-compatible API), Gemini, Claude, Mistral, DeepSeek, Zhipu AI, GGUF, LM Studio, vLLM, etc.
-  - 🎙️ Automatic Speech Recognition (ASR): sherpa-onnx, FunASR, Faster-Whisper, Whisper.cpp, Whisper, Groq Whisper, Azure ASR, etc.
-  - 🔊 Text-to-Speech (TTS): sherpa-onnx, pyttsx3, MeloTTS, Coqui-TTS, GPTSoVITS, Bark, CosyVoice, Edge TTS, Fish Audio, Azure TTS, etc.
+## Where the code lives
 
-- 🔧 **Highly customizable**:
-  - ⚙️ **Simple module configuration**: Switch various functional modules through simple configuration file modifications, without delving into the code
-  - 🎨 **Character customization**: Import custom Live2D models to give your AI companion a unique appearance. Shape your AI companion's persona by modifying the Prompt. Perform voice cloning to give your AI companion the voice you desire
-  - 🧩 **Flexible Agent implementation**: Inherit and implement the Agent interface to integrate any Agent architecture, such as HumeAI EVI, OpenAI Her, Mem0, etc.
-  - 🔌 **Good extensibility**: Modular design allows you to easily add your own LLM, ASR, TTS, and other module implementations, extending new features at any time
+Paths are under `src/open_llm_vtuber/`.
 
+| File | What it does |
+| --- | --- |
+| `agent/agents/realtime/realtime_agent.py` | Turn orchestration, held reply, opener split, speech pipeline |
+| `agent/agents/realtime/router.py` | Jev router and the Groq fallback race |
+| `agent/agents/realtime/talker.py` | Streaming OpenRouter client with provider hedging |
+| `agent/agents/realtime/context.py` | Memory window and prompt assembly |
+| `agent/agents/realtime/tasks.py` | Hermes Runs API client, approvals and task status lines |
+| `agent/agents/realtime/ack_pool.py` | Pre-generated, pre-rendered acknowledgements |
+| `agent/agents/realtime/openers.py` | Opener clips cut from a carrier sentence |
+| `agent/agents/realtime/prompts.py` | Instructions for acks, unsure, change, cancel, approvals and results |
+| `conversations/task_announcer.py` | Waits for quiet, then starts the task-result turn |
+| `conversations/filler.py` | Filler voice clips |
 
-## 👥 User Reviews
-> Thanks to the developer for open-sourcing and sharing the girlfriend for everyone to use
-> 
-> This girlfriend has been used over 100,000 times
+## Tests
 
+```bash
+uv run python tests/run_all.py
+```
 
-## 🚀 Quick Start
+## Credits and license
 
-Please refer to the [Quick Start](https://open-llm-vtuber.github.io/docs/quick-start) section in our documentation for installation.
+Yuna is a fork of [Open-LLM-VTuber](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber) by Yi-Ting Chiu and contributors, released under the [MIT license](LICENSE). The web frontend is the upstream [Open-LLM-VTuber-Web](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber-Web) submodule.
 
-
-
-## ☝ Update
-> :warning: `v1.0.0` has breaking changes and requires re-deployment. You *may* still update via the method below, but the `conf.yaml` file is incompatible and most of the dependencies needs to be reinstalled with `uv`. For those who came from versions before `v1.0.0`, I recommend deploy this project again with the [latest deployment guide](https://open-llm-vtuber.github.io/docs/quick-start).
-
-Please use `uv run update.py` to update if you installed any versions later than `v1.0.0`.
-
-## 😢 Uninstall  
-Most files, including Python dependencies and models, are stored in the project folder.
-
-However, models downloaded via ModelScope or Hugging Face may also be in `MODELSCOPE_CACHE` or `HF_HOME`. While we aim to keep them in the project's `models` directory, it's good to double-check.  
-
-Review the installation guide for any extra tools you no longer need, such as `uv`, `ffmpeg`, or `deeplx`.  
-
-## 🤗 Want to contribute?
-Checkout the [development guide](https://docs.llmvtuber.com/docs/development-guide/overview).
-
-
-# 🎉🎉🎉 Related Projects
-
-[ylxmf2005/LLM-Live2D-Desktop-Assitant](https://github.com/ylxmf2005/LLM-Live2D-Desktop-Assitant)
-- Your Live2D desktop assistant powered by LLM! Available for both Windows and MacOS, it senses your screen, retrieves clipboard content, and responds to voice commands with a unique voice. Featuring voice wake-up, singing capabilities, and full computer control for seamless interaction with your favorite character.
-
-
-
-
-
-
-## 📜 Third-Party Licenses
-
-### Live2D Sample Models Notice
+### Live2D sample models
 
 This project includes Live2D sample models provided by Live2D Inc. These assets are licensed separately under the Live2D Free Material License Agreement and the Terms of Use for Live2D Cubism Sample Data. They are not covered by the MIT license of this project.
 
 This content uses sample data owned and copyrighted by Live2D Inc. The sample data are utilized in accordance with the terms and conditions set by Live2D Inc. (See [Live2D Free Material License Agreement](https://www.live2d.jp/en/terms/live2d-free-material-license-agreement/) and [Terms of Use](https://www.live2d.com/eula/live2d-sample-model-terms_en.html)).
 
 Note: For commercial use, especially by medium or large-scale enterprises, the use of these Live2D sample models may be subject to additional licensing requirements. If you plan to use this project commercially, please ensure that you have the appropriate permissions from Live2D Inc., or use versions of the project without these models.
-
-
-## Contributors
-Thanks our contributors and maintainers for making this project possible.
-
-<a href="https://github.com/Open-LLM-VTuber/Open-LLM-VTuber/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=Open-LLM-VTuber/Open-LLM-VTuber" />
-</a>
-
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Open-LLM-VTuber/open-llm-vtuber&type=Date)](https://star-history.com/#Open-LLM-VTuber/open-llm-vtuber&Date)
-
-
-
-
-
