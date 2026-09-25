@@ -14,7 +14,12 @@ import httpx  # noqa: E402
 from _harness import run_module  # noqa: E402
 from realtime_fakes import FakeHermes, wait_until  # noqa: E402
 from src.open_llm_vtuber.agent.agents.realtime.loop_client import LoopBoundClient  # noqa: E402
-from src.open_llm_vtuber.agent.agents.realtime.prompts import WORKER_INSTRUCTIONS  # noqa: E402
+from src.open_llm_vtuber.agent.agents.realtime.prompts import (  # noqa: E402
+    MEMORY_REVIEW_INSTRUCTIONS,
+    TASK_REMEMBER_HINT,
+    WORKER_INSTRUCTIONS,
+    WORKER_SUMMARY,
+)
 from src.open_llm_vtuber.agent.agents.realtime.tasks import (  # noqa: E402
     TaskManager,
     TaskRecord,
@@ -49,6 +54,104 @@ async def test_start_posts_a_run():
     assert [t.id for t in tasks.active()] == ["t1"]
     await wait_until(lambda: hermes.calls("GET", "/events"))
     tasks.close()
+
+
+async def test_start_asks_for_the_configured_reasoning_effort():
+    hermes = FakeHermes()
+    tasks = make_manager(hermes, reasoning_effort="high")
+    await tasks.start("weather in delhi", [])
+    assert hermes.requests[0][2]["model_options"] == {"reasoning_effort": "high"}
+    tasks.close()
+
+
+async def test_start_points_hermes_at_the_saved_transcripts():
+    hermes = FakeHermes()
+    tasks = make_manager(hermes)
+    tasks.set_transcripts(
+        "C:/yuna/chat_history/mao_pro_001", "2026-09-24_01-39-48_abc.json"
+    )
+    await tasks.start("which restaurant did you pick last time", [])
+    instructions = hermes.requests[0][2]["instructions"]
+    assert instructions.startswith(WORKER_INSTRUCTIONS)
+    assert "C:/yuna/chat_history/mao_pro_001" in instructions
+    assert "2026-09-24_01-39-48_abc.json" in instructions
+    tasks.close()
+
+
+async def test_start_gives_hermes_the_conversation_summary():
+    hermes = FakeHermes()
+    tasks = make_manager(hermes)
+    tasks.set_transcripts(
+        "C:/yuna/chat_history/mao_pro_001", "2026-09-24_01-39-48_abc.json"
+    )
+    await tasks.start(
+        "book that place", HISTORY, summary="They picked a ramen place in Indiranagar."
+    )
+    instructions = hermes.requests[0][2]["instructions"]
+    expected = WORKER_SUMMARY.format(
+        summary="They picked a ramen place in Indiranagar."
+    )
+    assert instructions.startswith(f"{WORKER_INSTRUCTIONS}\n\n{expected}\n\n")
+    assert "C:/yuna/chat_history/mao_pro_001" in instructions
+    tasks.close()
+
+
+async def test_start_can_ask_hermes_to_consider_remembering():
+    hermes = FakeHermes()
+    tasks = make_manager(hermes)
+    await tasks.start(
+        "my birthday is november 14th, remind me a week before", [], remember=True
+    )
+    instructions = hermes.requests[0][2]["instructions"]
+    assert instructions.startswith(WORKER_INSTRUCTIONS)
+    assert instructions.endswith(TASK_REMEMBER_HINT)
+    tasks.close()
+
+
+async def test_memory_review_runs_silently():
+    hermes = FakeHermes()
+    tasks = make_manager(hermes, reasoning_effort="high")
+    announced = []
+    tasks.listener = announced.append
+    job = tasks.remember("Sam: hey\nYuna: What now?\nSam: my sister's name is ayesha")
+    await wait_until(lambda: hermes.calls("GET", "/events"))
+    method, path, body, _ = hermes.requests[0]
+    assert (method, path) == ("POST", "/v1/runs")
+    assert body["instructions"] == MEMORY_REVIEW_INSTRUCTIONS
+    assert body["input"].endswith("Sam: my sister's name is ayesha")
+    assert body["model_options"] == {"reasoning_effort": "high"}
+    assert "conversation_history" not in body
+    assert tasks.tasks == {} and tasks.active() == []
+    hermes.emit("run_1", event="run.completed", output="Saved: sister is Ayesha.")
+    assert await job == "Saved: sister is Ayesha."
+    assert announced == [] and tasks.untold_results() == []
+    tasks.close()
+
+
+async def test_memory_review_denies_approval_requests():
+    hermes = FakeHermes()
+    tasks = make_manager(hermes)
+    job = tasks.remember("Sam: i hate horror movies")
+    await wait_until(lambda: hermes.calls("GET", "/events"))
+    hermes.emit("run_1", event="approval.request", command="rm -rf x", request_id="r1")
+    await wait_until(lambda: hermes.calls("POST", "/approval"))
+    assert hermes.calls("POST", "/approval")[0][2] == {
+        "choice": "deny",
+        "request_id": "r1",
+    }
+    hermes.emit("run_1", event="run.completed", output="nothing")
+    assert await job == "nothing"
+    tasks.close()
+
+
+async def test_memory_review_failures_are_only_logged():
+    hermes = FakeHermes(start_status=500)
+    tasks = make_manager(hermes)
+    assert await tasks.remember("Sam: i'm vegetarian") is None
+    hermes = FakeHermes()
+    hermes.unreachable = True
+    tasks = make_manager(hermes)
+    assert await tasks.remember("Sam: i'm vegetarian") is None
 
 
 async def test_completed_run_reports_result_once():

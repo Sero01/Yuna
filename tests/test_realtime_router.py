@@ -14,6 +14,7 @@ import httpx  # noqa: E402
 
 from _harness import run_module  # noqa: E402
 from src.open_llm_vtuber.agent.agents.realtime.loop_client import LoopBoundClient  # noqa: E402
+from src.open_llm_vtuber.agent.agents.realtime.prompts import REMEMBER_Q  # noqa: E402
 from src.open_llm_vtuber.agent.agents.realtime.router import (  # noqa: E402
     FallbackRouter,
     JevRouter,
@@ -74,7 +75,9 @@ def route_answer(choice, **probs):
     }
 
 
-def make_router(fake, with_fallback=True, timeout=0.5, fallback_after=None):
+def make_router(
+    fake, with_fallback=True, timeout=0.5, fallback_after=None, remember=False
+):
     get = LoopBoundClient(transport=httpx.MockTransport(fake.handler)).get
     fallback = (
         FallbackRouter(
@@ -95,16 +98,18 @@ def make_router(fake, with_fallback=True, timeout=0.5, fallback_after=None):
         timeout_s=timeout,
         fallback=fallback,
         fallback_after_s=timeout if fallback_after is None else fallback_after,
+        remember=remember,
     )
 
 
-def state(text, tasks=(), offer=None, approval=None):
+def state(text, tasks=(), offer=None, approval=None, facts=""):
     return RouterState(
         latest_user_message=text,
         recent_conversation="Sam: hey\nYuna: Hmph, what now?",
         active_tasks=list(tasks),
         pending_offer=offer,
         pending_approval=approval,
+        known_facts=facts,
     )
 
 
@@ -208,6 +213,52 @@ async def test_chat_route_and_request_shape():
     assert body["state"]["active_tasks"] == "none"
     assert "pending_offer" not in body["state"]
     assert fake.auth[0] == "Bearer or-key"
+
+
+async def test_remember_question_goes_with_the_known_facts():
+    fake = FakeOpenRouter(
+        {
+            "route": route_answer("chat", chat=0.9, new_task=0.1, followup=0),
+            "remember": {"type": "noul", "noul": 0.82},
+        }
+    )
+    route = await make_router(fake, remember=True).decide(
+        state("my sister's name is ayesha", facts="- Has a younger sister.")
+    )
+    body = fake.jev_bodies[0]
+    assert body["questions"]["remember"] == REMEMBER_Q
+    assert body["state"]["known_facts"] == "- Has a younger sister."
+    assert route.kind == "chat" and route.p_remember == 0.82, route
+
+
+async def test_remember_rides_along_with_every_route_kind():
+    fake = FakeOpenRouter(
+        {
+            "route": route_answer("new_task", chat=0.05, new_task=0.95, followup=0),
+            "remember": {"type": "noul", "noul": 0.9},
+        }
+    )
+    route = await make_router(fake, remember=True).decide(
+        state("remind me my birthday is on november 14th")
+    )
+    assert route.kind == "new_task" and route.p_remember == 0.9, route
+    assert fake.jev_bodies[0]["state"]["known_facts"] == "none"
+
+
+async def test_remember_is_not_asked_unless_enabled():
+    fake = FakeOpenRouter(
+        {"route": route_answer("chat", chat=0.97, new_task=0.03, followup=0)}
+    )
+    route = await make_router(fake).decide(state("hi", facts="- Likes Pokemon."))
+    assert "remember" not in fake.jev_bodies[0]["questions"]
+    assert "known_facts" not in fake.jev_bodies[0]["state"]
+    assert route.p_remember is None
+
+
+async def test_fallback_routes_carry_no_remember_answer():
+    fake = FakeOpenRouter(jev_status=500)
+    route = await make_router(fake, remember=True).decide(state("i hate horror movies"))
+    assert route.source == "fallback" and route.p_remember is None, route
 
 
 async def test_new_task_route():

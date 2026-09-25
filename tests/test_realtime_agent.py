@@ -31,8 +31,14 @@ from src.open_llm_vtuber.agent.agents.realtime.prompts import (  # noqa: E402
     DENIED_INSTRUCTION,
     CHANGE_INSTRUCTION,
     FALLBACK_LINE,
+    MEMORY_REVIEW_INSTRUCTIONS,
+    SUMMARY_CONDENSE_INSTRUCTIONS,
+    SUMMARY_HEADER,
+    SUMMARY_INSTRUCTIONS,
+    TASK_REMEMBER_HINT,
     TASK_STATE_HEADER,
     UNSURE_INSTRUCTION,
+    WORKER_SUMMARY,
 )
 from src.open_llm_vtuber.agent.agents.realtime.realtime_agent import RealtimeAgent  # noqa: E402
 from src.open_llm_vtuber.agent.agents.realtime.router import Route  # noqa: E402
@@ -65,11 +71,21 @@ class FakeTalker:
         delay=0.0,
         fail=False,
         ack="Fine, on it.",
+        summary="They talked about exams.",
+        summary_error=None,
+        summary_delay=0.0,
+        condensed="- Shorter notes.",
+        condense_error=None,
     ):
         self.reply = reply
         self.delay = delay
         self.fail = fail
         self.ack = ack
+        self.summary = summary
+        self.summary_error = summary_error
+        self.summary_delay = summary_delay
+        self.condensed = condensed
+        self.condense_error = condense_error
         self.calls = []
         self.completions = []
         self.cancelled = 0
@@ -90,7 +106,34 @@ class FakeTalker:
 
     async def complete(self, messages, max_tokens=60):
         self.completions.append(messages)
+        if messages[0]["content"] == SUMMARY_INSTRUCTIONS:
+            await asyncio.sleep(self.summary_delay)
+            if self.summary_error is not None:
+                raise self.summary_error
+            return self.summary
+        if messages[0]["content"] == SUMMARY_CONDENSE_INSTRUCTIONS:
+            if self.condense_error is not None:
+                raise self.condense_error
+            return self.condensed
         return self.ack
+
+
+def summary_requests(talker):
+    return [m for m in talker.completions if m[0]["content"] == SUMMARY_INSTRUCTIONS]
+
+
+def condense_requests(talker):
+    return [
+        m
+        for m in talker.completions
+        if m[0]["content"] == SUMMARY_CONDENSE_INSTRUCTIONS
+    ]
+
+
+def fill(agent, exchanges):
+    for i in range(exchanges):
+        agent.memory.add("user", f"u{i}")
+        agent.memory.add("assistant", f"a{i}")
 
 
 TTS_PREPROCESSOR = template_tts_preprocessor_config()
@@ -275,6 +318,49 @@ async def test_failed_task_start_explains_instead_of_acking():
     assert "couldn't start (Hermes refused the task (HTTP 500))" in instruction, (
         instruction
     )
+
+
+def ready_ack(agent, folder, text="Ugh, fine. On it."):
+    path = os.path.join(folder, "ack.wav")
+    with open(path, "wb") as f:
+        f.write(b"RIFF")
+    agent.ack_pool.ready = [Ack(text, path)]
+    agent.ack_pool.size = 1
+
+
+async def test_slow_task_start_is_acknowledged_without_waiting():
+    hermes = FakeHermes(start_delay=0.5)
+    agent, _ = make_agent(
+        hermes=hermes, router=FakeRouter(Route("new_task", p_task=0.9))
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        ready_ack(agent, tmp)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        stream = agent.chat(user_turn("check my email"))
+        first = await stream.__anext__()
+        assert loop.time() - started < 0.3, "the ack doesn't wait for Hermes"
+        assert (
+            isinstance(first, AudioOutput) and first.transcript == "Ugh, fine. On it."
+        )
+        rest = [out async for out in stream]
+        assert loop.time() - started >= 0.5, "the turn still waits for the start"
+    assert rest == [], rest
+    assert agent.tasks.active(), "the task was started"
+
+
+async def test_slow_task_start_that_fails_is_corrected_after_the_ack():
+    hermes = FakeHermes(start_delay=0.3, start_status=500)
+    agent, _ = make_agent(
+        hermes=hermes, router=FakeRouter(Route("new_task", p_task=0.9))
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        ready_ack(agent, tmp)
+        outputs = await collect(agent, user_turn("check my email"))
+    assert isinstance(outputs[0], AudioOutput), outputs
+    assert any(isinstance(o, SentenceOutput) for o in outputs[1:]), outputs
+    instruction = trailing(agent.talker.calls[-1])
+    assert "couldn't start (Hermes refused the task (HTTP 500))" in instruction
 
 
 async def test_unsure_asks_and_accepting_the_offer_starts_the_task():
@@ -623,16 +709,242 @@ async def test_proactive_turn_skips_routing():
     assert not any(m["role"] == "user" for m in agent.memory.messages)
 
 
-async def test_talker_context_holds_the_last_eight_exchanges():
-    agent, _ = make_agent(router=FakeRouter(Route("chat")), max_turns=8)
-    for i in range(12):
-        agent.memory.add("user", f"u{i}")
-        agent.memory.add("assistant", f"a{i}")
+async def test_without_summaries_the_talker_holds_the_last_eight_exchanges():
+    agent, _ = make_agent(
+        router=FakeRouter(Route("chat")), max_turns=8, summarize_history=False
+    )
+    fill(agent, 12)
     await collect(agent, user_turn("now"))
     messages = agent.talker.calls[0]["messages"]
     assert len(messages) == 1 + 16 + 1, len(messages)
     assert messages[1] == {"role": "user", "content": "u4"}
     assert messages[-1] == {"role": "user", "content": "now"}
+    assert summary_requests(agent.talker) == []
+
+
+async def test_without_summaries_the_window_trims_in_steps_of_a_fifth():
+    agent, _ = make_agent(
+        router=FakeRouter(Route("chat")), max_turns=50, summarize_history=False
+    )
+    fill(agent, 55)
+    await collect(agent, user_turn("now"))
+    messages = agent.talker.calls[0]["messages"]
+    # 55 exchanges, 5 over -> the start jumps a whole step of 10, to u10.
+    assert messages[1] == {"role": "user", "content": "u10"}, messages[1]
+    assert len(messages) == 1 + 90 + 1
+
+
+async def test_old_exchanges_are_summarized_in_the_background():
+    talker = FakeTalker(reply="Hmph.", summary="They talked about exams.")
+    agent, _ = make_agent(
+        router=FakeRouter(), talker=talker, max_turns=50, summary_keep_turns=10
+    )
+    fill(agent, 49)
+    await collect(agent, user_turn("u49"))
+    assert summary_requests(talker) == []  # 49 finished exchanges: not yet
+
+    await collect(agent, user_turn("now"))
+    # This turn still sees everything; the summary is made off the critical path.
+    assert talker.calls[1]["messages"][1] == {"role": "user", "content": "u0"}
+    await wait_until(lambda: agent.memory.summary)
+    request = summary_requests(talker)[0][1]["content"]
+    assert "Sam: u0\nYuna: a0" in request and "Sam: u39\nYuna: a39" in request
+    assert "u40" not in request
+
+    await collect(agent, user_turn("and now"))
+    messages = talker.calls[2]["messages"]
+    assert messages[1] == {
+        "role": "system",
+        "content": f"{SUMMARY_HEADER}\nThey talked about exams.",
+    }
+    assert messages[2] == {"role": "user", "content": "u40"}
+    assert messages[-1] == {"role": "user", "content": "and now"}
+    assert len(summary_requests(talker)) == 1
+
+
+async def test_new_notes_are_added_after_the_old_ones_word_for_word():
+    talker = FakeTalker(summary="- They planned a trip to Goa.")
+    agent, _ = make_agent(router=FakeRouter(), talker=talker, max_turns=50)
+    fill(agent, 90)
+    agent.memory.set_summary("- They talked about exams.", 40)
+    await collect(agent, user_turn("now"))
+    await wait_until(lambda: agent.memory.summarized_exchanges == 80)
+    assert agent.memory.summary == (
+        "- They talked about exams.\n- They planned a trip to Goa."
+    )
+    request = summary_requests(talker)[0][1]["content"]
+    assert "- They talked about exams." in request  # so the notes don't repeat it
+    assert "Sam: u40\nYuna: a40" in request and "u80" not in request
+    assert condense_requests(talker) == []
+
+
+async def test_notes_are_condensed_once_they_run_long():
+    talker = FakeTalker(summary="- They planned a trip to Goa.")
+    agent, _ = make_agent(router=FakeRouter(), talker=talker, max_turns=50)
+    fill(agent, 90)
+    old = "\n".join(f"- Topic {i} went on for a while." for i in range(60))
+    agent.memory.set_summary(old, 40)
+    await collect(agent, user_turn("now"))
+    await wait_until(lambda: agent.memory.summarized_exchanges == 80)
+    assert agent.memory.summary == "- Shorter notes."
+    condense = condense_requests(talker)[0][1]["content"]
+    assert condense == f"{old}\n- They planned a trip to Goa."
+
+
+async def test_long_notes_stay_whole_if_condensing_fails():
+    talker = FakeTalker(
+        summary="- They planned a trip to Goa.",
+        condense_error=TalkerError("both providers down"),
+    )
+    agent, _ = make_agent(router=FakeRouter(), talker=talker, max_turns=50)
+    fill(agent, 90)
+    old = "\n".join(f"- Topic {i} went on for a while." for i in range(60))
+    agent.memory.set_summary(old, 40)
+    await collect(agent, user_turn("now"))
+    await wait_until(lambda: agent.memory.summarized_exchanges == 80)
+    assert agent.memory.summary == f"{old}\n- They planned a trip to Goa."
+
+
+async def test_a_failed_summary_keeps_the_whole_window_and_is_retried():
+    talker = FakeTalker(summary_error=TalkerError("both providers down"))
+    agent, _ = make_agent(router=FakeRouter(), talker=talker, max_turns=50)
+    fill(agent, 50)
+    await collect(agent, user_turn("now"))
+    await wait_until(lambda: summary_requests(talker))
+    await asyncio.sleep(0.01)
+    await collect(agent, user_turn("again"))
+    assert talker.calls[1]["messages"][1] == {"role": "user", "content": "u0"}
+    await wait_until(lambda: len(summary_requests(talker)) == 2)
+    assert agent.memory.summary == ""
+
+
+async def test_loading_another_history_drops_an_unfinished_summary():
+    from src.open_llm_vtuber.agent.agents.realtime import context as context_module
+
+    talker = FakeTalker(summary_delay=0.2)
+    agent, _ = make_agent(talker=talker, max_turns=50, share_transcripts=False)
+    fill(agent, 50)
+    await collect(agent, user_turn("now"))
+    await wait_until(lambda: summary_requests(talker))
+    original = context_module.get_history
+    context_module.get_history = lambda conf, uid: []
+    try:
+        agent.set_memory_from_history("mao_pro_001", "no_such_history")
+    finally:
+        context_module.get_history = original
+    await asyncio.sleep(0.3)
+    assert agent.memory.summary == ""
+
+
+async def test_tasks_get_the_summary_too():
+    router = FakeRouter(Route("new_task", p_task=0.95))
+    agent, hermes = make_agent(router=router, max_turns=50)
+    fill(agent, 20)
+    agent.memory.set_summary("They picked a ramen place.", 10)
+    await collect(agent, user_turn("book it"))
+    instructions = hermes.calls("POST", "/v1/runs")[0][2]["instructions"]
+    assert WORKER_SUMMARY.format(summary="They picked a ramen place.") in instructions
+    agent.tasks.close()
+
+
+async def test_workers_get_fewer_exchanges_than_the_talker():
+    router = FakeRouter(Route("new_task", p_task=0.95))
+    agent, hermes = make_agent(router=router, max_turns=50, worker_max_turns=8)
+    for i in range(20):
+        agent.memory.add("user", f"u{i}")
+        agent.memory.add("assistant", f"a{i}")
+    await collect(agent, user_turn("weather in delhi"))
+    history = hermes.calls("POST", "/v1/runs")[0][2]["conversation_history"]
+    assert len(history) == 16 and history[0]["content"] == "u12", history[:2]
+    agent.tasks.close()
+
+
+async def test_flagged_chat_turn_asks_hermes_whether_to_remember_it():
+    router = FakeRouter(Route("chat"), Route("chat", p_remember=0.8))
+    agent, hermes = make_agent(router=router, talker=FakeTalker(reply="What now?"))
+    await collect(agent, user_turn("hey"))
+    outputs = await collect(agent, user_turn("my sister's name is ayesha"))
+    assert "What now?" in spoken(outputs)
+    await wait_until(lambda: hermes.calls("POST", "/v1/runs"))
+    runs = hermes.calls("POST", "/v1/runs")
+    assert len(runs) == 1
+    body = runs[0][2]
+    assert body["instructions"] == MEMORY_REVIEW_INSTRUCTIONS
+    assert "Sam: hey\nYuna: What now?" in body["input"]
+    assert body["input"].endswith("Sam: my sister's name is ayesha")
+    assert agent.tasks.tasks == {}
+    agent.tasks.close()
+
+
+async def test_unflagged_turns_leave_memory_alone():
+    router = FakeRouter(Route("chat", p_remember=0.3), Route("chat"))
+    agent, hermes = make_agent(router=router)
+    await collect(agent, user_turn("ugh i'm so tired today"))
+    await collect(agent, user_turn("tell me a joke"))
+    await asyncio.sleep(0.05)
+    assert hermes.calls("POST", "/v1/runs") == []
+
+
+async def test_remember_threshold_zero_turns_the_check_off():
+    router = FakeRouter(Route("chat", p_remember=0.99))
+    agent, hermes = make_agent(router=router, remember_threshold=0)
+    await collect(agent, user_turn("i'm allergic to cashews"))
+    await asyncio.sleep(0.05)
+    assert hermes.calls("POST", "/v1/runs") == []
+
+
+async def test_flagged_task_turn_passes_the_hint_instead_of_a_second_run():
+    router = FakeRouter(Route("new_task", p_task=0.95, p_remember=0.9))
+    agent, hermes = make_agent(router=router)
+    agent.ack_pool.take = lambda: Ack("On it.")
+    await collect(agent, user_turn("i moved to koramangala, find gyms near me"))
+    await asyncio.sleep(0.05)
+    runs = hermes.calls("POST", "/v1/runs")
+    assert len(runs) == 1
+    assert runs[0][2]["instructions"].endswith(TASK_REMEMBER_HINT)
+    assert runs[0][2]["input"] == "i moved to koramangala, find gyms near me"
+    agent.tasks.close()
+
+
+async def test_router_gets_the_known_facts():
+    with tempfile.TemporaryDirectory() as tmp:
+        user = os.path.join(tmp, "USER.md")
+        with open(user, "w", encoding="utf-8") as f:
+            f.write("Likes Pokemon.")
+        router = FakeRouter(Route("chat"))
+        agent, _ = make_agent(router=router)
+        agent.context = ContextBuilder("You are Yuna.", "", user)
+        await collect(agent, user_turn("hey"))
+    assert router.states[0].known_facts == "- Likes Pokemon."
+
+
+def test_loading_a_history_points_tasks_at_its_transcript():
+    from src.open_llm_vtuber.agent.agents.realtime import context as context_module
+
+    agent, _ = make_agent()
+    original = context_module.get_history
+    context_module.get_history = lambda conf, uid: []
+    try:
+        agent.set_memory_from_history("mao_pro_001", "2026-09-24_01-39-48_abc")
+    finally:
+        context_module.get_history = original
+    assert agent.tasks.transcripts_dir == os.path.abspath(
+        os.path.join("chat_history", "mao_pro_001")
+    )
+    assert agent.tasks.current_transcript == "2026-09-24_01-39-48_abc.json"
+
+
+def test_transcripts_can_be_kept_from_hermes():
+    from src.open_llm_vtuber.agent.agents.realtime import context as context_module
+
+    agent, _ = make_agent(share_transcripts=False)
+    original = context_module.get_history
+    context_module.get_history = lambda conf, uid: []
+    try:
+        agent.set_memory_from_history("mao_pro_001", "2026-09-24_01-39-48_abc")
+    finally:
+        context_module.get_history = original
+    assert agent.tasks.transcripts_dir == ""
 
 
 def test_factory_builds_a_realtime_agent():
@@ -657,6 +969,15 @@ def test_factory_builds_a_realtime_agent():
     assert agent.max_turns == 6 and agent.ai_name == "Yuna"
     assert agent.talker.model == "deepseek/deepseek-v4.1-flash"
     assert agent.router.fallback is not None
+    assert agent.router.remember is True
+    assert agent.tasks.reasoning_effort == "high"
+    assert agent.worker_max_turns == 8 and agent.remember_threshold == 0.5
+    # Summaries on; with only 6 turns, at most 5 can be kept word for word.
+    assert agent.summarize_history is True and agent.summary_keep_turns == 5
+    # The talker is told it's Yuna's voice and that Hermes is her background helper.
+    prompt = agent.context.system_prompt()
+    assert prompt.startswith("You are Yuna.")
+    assert "Hermes Agent" in prompt and "deepseek/deepseek-v4.1-flash" in prompt
 
 
 if __name__ == "__main__":

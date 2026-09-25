@@ -3,6 +3,7 @@
 Run directly:  .venv/Scripts/python.exe tests/test_realtime_openers.py
 """
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -15,12 +16,17 @@ from pydub.generators import Sine  # noqa: E402
 from _harness import run_module  # noqa: E402
 from realtime_fakes import wait_until  # noqa: E402
 from test_realtime_agent import (  # noqa: E402
+    FakeRouter,
     FakeTalker,
     collect,
     make_agent,
+    ready_ack,
     spoken,
+    trailing,
     user_turn,
 )
+from src.open_llm_vtuber.agent.agents.realtime import realtime_agent  # noqa: E402
+from src.open_llm_vtuber.agent.agents.realtime.router import Route  # noqa: E402
 from src.open_llm_vtuber.agent.agents.realtime.openers import (  # noqa: E402
     UNDECIDED,
     OpenerLibrary,
@@ -178,6 +184,113 @@ async def test_reply_opener_plays_its_clip_first():
         assert rest and "Hmph" not in " ".join(o.display_text.text for o in rest)
         assert spoken(outputs).startswith("Hmph, hello there"), spoken(outputs)
         assert agent.memory.messages[-1]["content"] == "Hmph, hello there, dummy."
+
+
+async def test_spoken_replies_are_reminded_to_open_with_an_interjection():
+    with tempfile.TemporaryDirectory() as tmp:
+        talker = FakeTalker(reply="Hmph, hi.")
+        agent, _ = make_agent(talker=talker, openers=ready_library(tmp, "Hmph,"))
+        await collect(agent, user_turn("hi yuna"))
+        messages = talker.calls[0]["messages"]
+        assert messages[-2] == {"role": "user", "content": "hi yuna"}, messages
+        assert messages[-1]["role"] == "system", "the reminder follows the user turn"
+        assert "after any expression keyword" in messages[-1]["content"]
+        assert "Hmph," in messages[-1]["content"]
+
+
+async def test_no_reminder_without_openers():
+    talker = FakeTalker(reply="Hello.")
+    agent, _ = make_agent(talker=talker)
+    await collect(agent, user_turn("hi yuna"))
+    assert talker.calls[0]["messages"][-1] == {"role": "user", "content": "hi yuna"}
+
+
+class quick_early_opener:
+    """Shrinks EARLY_OPENER_AFTER_S so a slow route takes milliseconds, not seconds."""
+
+    def __enter__(self):
+        self.saved = realtime_agent.EARLY_OPENER_AFTER_S
+        realtime_agent.EARLY_OPENER_AFTER_S = 0.05
+
+    def __exit__(self, *exc):
+        realtime_agent.EARLY_OPENER_AFTER_S = self.saved
+
+
+async def test_slow_route_speaks_the_opener_before_it_arrives():
+    with tempfile.TemporaryDirectory() as tmp, quick_early_opener():
+        router = FakeRouter(Route("chat"), delay=0.3)
+        agent, _ = make_agent(
+            router=router,
+            talker=FakeTalker(reply="Hmph, fine, hello there."),
+            openers=ready_library(tmp, "Hmph,", "Fine,"),
+        )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        stream = agent.chat(user_turn("hi yuna"))
+        first = await stream.__anext__()
+        assert loop.time() - started < 0.2, "the opener didn't wait for the route"
+        assert isinstance(first, AudioOutput) and first.transcript == "Hmph,"
+        rest = [out async for out in stream]
+        assert spoken([first] + rest) == "Hmph, fine, hello there.", spoken(rest)
+        assert agent.memory.messages[-1] == {
+            "role": "assistant",
+            "content": "Hmph, fine, hello there.",
+        }
+
+
+async def test_opener_spoken_early_is_not_repeated_by_an_instructed_reply():
+    with tempfile.TemporaryDirectory() as tmp, quick_early_opener():
+        talker = FakeTalker(reply="Huh? what do you mean?")
+        agent, _ = make_agent(
+            router=FakeRouter(Route("unsure", p_task=0.5), delay=0.3),
+            talker=talker,
+            openers=ready_library(tmp, "Huh?"),
+        )
+        outputs = await collect(agent, user_turn("the thing"))
+        assert isinstance(outputs[0], AudioOutput), outputs
+        hint = trailing(talker.calls[-1])
+        assert 'already said "Huh?"' in hint, hint
+        assert agent.memory.messages[-1]["content"].startswith("Huh? "), (
+            agent.memory.messages
+        )
+
+
+async def test_early_opener_then_task_ack():
+    with tempfile.TemporaryDirectory() as tmp, quick_early_opener():
+        agent, _ = make_agent(
+            router=FakeRouter(Route("new_task", p_task=0.9), delay=0.3),
+            talker=FakeTalker(reply="Oh, the weather is sunny."),
+            openers=ready_library(tmp, "Oh,"),
+        )
+        ready_ack(agent, tmp)
+        outputs = await collect(agent, user_turn("weather in delhi?"))
+        assert [o.transcript for o in outputs] == ["Oh,", "Ugh, fine. On it."], outputs
+        assert agent.memory.messages[-1]["content"] == "Oh, Ugh, fine. On it."
+        assert "sunny" not in str(agent.memory.messages)
+
+
+async def test_fast_route_waits_as_before():
+    with tempfile.TemporaryDirectory() as tmp, quick_early_opener():
+        agent, _ = make_agent(
+            router=FakeRouter(Route("new_task", p_task=0.9)),
+            talker=FakeTalker(reply="Oh, the weather is sunny."),
+            openers=ready_library(tmp, "Oh,"),
+        )
+        ready_ack(agent, tmp)
+        outputs = await collect(agent, user_turn("weather in delhi?"))
+        assert [o.transcript for o in outputs] == ["Ugh, fine. On it."], outputs
+
+
+async def test_no_early_opener_when_the_reply_has_none():
+    with tempfile.TemporaryDirectory() as tmp, quick_early_opener():
+        agent, _ = make_agent(
+            router=FakeRouter(Route("chat"), delay=0.2),
+            talker=FakeTalker(reply="Well hello there."),
+            openers=ready_library(tmp, "Hmph,"),
+        )
+        outputs = await collect(agent, user_turn("hi"))
+        assert all(isinstance(o, SentenceOutput) for o in outputs), outputs
+        assert "Well hello there." in spoken(outputs)
 
 
 async def test_opener_takes_the_expression_of_leading_tags():

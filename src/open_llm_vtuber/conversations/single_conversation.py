@@ -81,13 +81,19 @@ async def process_single_conversation(
 
         # Store user message (check if we should skip storing to history)
         skip_history = metadata and metadata.get("skip_history", False)
+        human_stored = None
         if context.history_uid and not skip_history:
-            store_message(
-                conf_uid=context.character_config.conf_uid,
-                history_uid=context.history_uid,
-                role="human",
-                content=input_text,
-                name=context.character_config.human_name,
+            # In a thread, so the reply doesn't wait for the file write; awaited before
+            # the AI message is stored.
+            human_stored = asyncio.create_task(
+                asyncio.to_thread(
+                    store_message,
+                    conf_uid=context.character_config.conf_uid,
+                    history_uid=context.history_uid,
+                    role="human",
+                    content=input_text,
+                    name=context.character_config.human_name,
+                )
             )
 
         if skip_history:
@@ -164,6 +170,11 @@ async def process_single_conversation(
             client_uid=client_uid,
         )
 
+        if human_stored is not None:
+            try:
+                await human_stored
+            except Exception as e:
+                logger.error(f"Could not store the user's message: {e}")
         if context.history_uid and full_response:  # Check full_response before storing
             store_message(
                 conf_uid=context.character_config.conf_uid,
@@ -186,12 +197,16 @@ async def process_single_conversation(
         logger.exception(f"Error in conversation chain: {type(e).__name__}: {e}")
         try:
             await websocket_send(
-                json.dumps({"type": "error", "message": f"Conversation error: {str(e)}"})
+                json.dumps(
+                    {"type": "error", "message": f"Conversation error: {str(e)}"}
+                )
             )
         except Exception as send_error:
             # The socket is often the thing that just broke; don't let reporting
             # the failure replace it with a less useful one.
-            logger.warning(f"Could not report conversation error to client: {send_error}")
+            logger.warning(
+                f"Could not report conversation error to client: {send_error}"
+            )
         raise
     finally:
         filler.stop()

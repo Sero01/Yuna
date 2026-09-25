@@ -5,18 +5,28 @@ import itertools
 import json
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import httpx
 from loguru import logger
 
-from .prompts import WORKER_INSTRUCTIONS
+from .prompts import (
+    MEMORY_REVIEW_INPUT,
+    MEMORY_REVIEW_INSTRUCTIONS,
+    TASK_REMEMBER_HINT,
+    TRANSCRIPTS_POINTER,
+    WORKER_INSTRUCTIONS,
+    WORKER_SUMMARY,
+)
 
 RUNNING, DONE, FAILED, CANCELLED = "running", "done", "failed", "cancelled"
 
 # Misheard speech must never grant a lasting permission, so voice can only answer
 # "once" or "deny"; "session" and "always" are left to Hermes' own clients.
 VOICE_APPROVAL_CHOICES = ("once", "deny")
+
+# Hermes kills a stalled model stream after 180 s and retries; wait out one retry.
+MEMORY_REVIEW_TIMEOUT_S = 300.0
 
 
 class TaskStartError(Exception):
@@ -83,7 +93,10 @@ class TaskRecord:
 
 
 class TaskManager:
-    """Starts and follows hermes-agent runs; calls `listener` when one finishes."""
+    """Starts and follows hermes-agent runs; calls `listener` when one finishes.
+
+    Memory reviews (`remember`) are separate, silent runs: never announced, never listed
+    as tasks, and any approval they ask for is denied."""
 
     def __init__(
         self,
@@ -95,6 +108,7 @@ class TaskManager:
         recent_window_s: float = 600.0,
         poll_interval_s: float = 2.0,
         clock: Callable[[], float] = time.time,
+        reasoning_effort: str = "",
     ):
         self._get_client = get_client
         self.base_url = base_url.rstrip("/")
@@ -108,6 +122,10 @@ class TaskManager:
         self.listener: Optional[Callable[[TaskRecord], None]] = None
         self._watchers: Dict[str, asyncio.Task] = {}
         self._ids = itertools.count(1)
+        self.reasoning_effort = reasoning_effort  # '' = Hermes' own setting
+        self.transcripts_dir = ""
+        self.current_transcript = ""
+        self._reviews: Set[asyncio.Task] = set()
 
     @property
     def _headers(self) -> Dict[str, str]:
@@ -156,16 +174,53 @@ class TaskManager:
         if rec is not None and rec.approval is not None:
             rec.approval.told = True
 
+    # ---- settings ----
+
+    def set_transcripts(self, directory: str, current: str) -> None:
+        """Tell task runs where the saved voice transcripts are ('' to stop)."""
+        self.transcripts_dir = directory
+        self.current_transcript = current
+
+    def _worker_instructions(self, remember: bool, summary: str = "") -> str:
+        parts = [WORKER_INSTRUCTIONS]
+        if summary:
+            parts.append(WORKER_SUMMARY.format(summary=summary))
+        if self.transcripts_dir:
+            parts.append(
+                TRANSCRIPTS_POINTER.format(
+                    directory=self.transcripts_dir,
+                    current=self.current_transcript or "not saved yet",
+                )
+            )
+        if remember:
+            parts.append(TASK_REMEMBER_HINT)
+        return "\n\n".join(parts)
+
+    def _with_model_options(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        if self.reasoning_effort:
+            body["model_options"] = {"reasoning_effort": self.reasoning_effort}
+        return body
+
     # ---- actions ----
 
-    async def start(self, request: str, history: List[Dict[str, str]]) -> TaskRecord:
+    async def start(
+        self,
+        request: str,
+        history: List[Dict[str, str]],
+        remember: bool = False,
+        summary: str = "",
+    ) -> TaskRecord:
+        """Start a task. `remember` asks Hermes to also consider saving what the user
+        said about themselves; `summary` covers the conversation before `history`."""
         if len(self.active()) >= self.max_active:
             raise TaskStartError(f"already running {self.max_active} tasks")
-        body = {
-            "input": request,
-            "conversation_history": history,
-            "instructions": WORKER_INSTRUCTIONS,
-        }
+        body = self._with_model_options(
+            {
+                "input": request,
+                "conversation_history": history,
+                "instructions": self._worker_instructions(remember, summary),
+            }
+        )
         try:
             response = await self._get_client().post(
                 f"{self.base_url}/v1/runs",
@@ -248,13 +303,108 @@ class TaskManager:
         )
         return response.status_code == 200
 
+    def remember(self, excerpt: str) -> "asyncio.Task[Optional[str]]":
+        """Let Hermes decide, in the background, whether this moment of the conversation
+        is worth saving to memory. The task's result is Hermes' one-line summary, or None
+        if the run couldn't start or finish; it never raises."""
+        job = asyncio.create_task(self._review(excerpt))
+        self._reviews.add(job)
+        job.add_done_callback(self._reviews.discard)
+        return job
+
     def close(self) -> None:
-        for watcher in self._watchers.values():
+        for watcher in [*self._watchers.values(), *self._reviews]:
             try:
                 watcher.cancel()
             except RuntimeError:  # its event loop is already closed
                 pass
         self._watchers.clear()
+        self._reviews.clear()
+
+    # ---- memory reviews ----
+
+    async def _review(self, excerpt: str) -> Optional[str]:
+        body = self._with_model_options(
+            {
+                "input": MEMORY_REVIEW_INPUT.format(excerpt=excerpt),
+                "instructions": MEMORY_REVIEW_INSTRUCTIONS,
+            }
+        )
+        try:
+            response = await self._get_client().post(
+                f"{self.base_url}/v1/runs",
+                json=body,
+                headers=self._headers,
+                timeout=10.0,
+            )
+            run_id = (
+                response.json().get("run_id") if response.status_code < 300 else None
+            )
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning(f"Memory review: Hermes isn't reachable ({e})")
+            return None
+        if not run_id:
+            logger.warning(
+                f"Memory review: Hermes refused (HTTP {response.status_code})"
+            )
+            return None
+        logger.info(f"Memory review started as Hermes run {run_id}")
+        try:
+            outcome = await asyncio.wait_for(
+                self._follow_review(run_id), MEMORY_REVIEW_TIMEOUT_S
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Memory review {run_id}: {type(e).__name__}: {e}")
+            return None
+        logger.info(f"Memory review {run_id}: {outcome or 'no result'}")
+        return outcome
+
+    async def _follow_review(self, run_id: str) -> Optional[str]:
+        async with self._get_client().stream(
+            "GET",
+            f"{self.base_url}/v1/runs/{run_id}/events",
+            headers=self._headers,
+            timeout=httpx.Timeout(10.0, read=None),
+        ) as response:
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"events endpoint returned HTTP {response.status_code}"
+                )
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                name = event.get("event")
+                if name == "approval.request":
+                    await self._deny(run_id, event)
+                elif name == "run.completed":
+                    return (event.get("output") or "").strip()
+                elif name in ("run.failed", "run.cancelled"):
+                    return None
+        return None
+
+    async def _deny(self, run_id: str, event: dict) -> None:
+        """Memory reviews run unattended, so nothing they ask permission for is allowed."""
+        body = {"choice": "deny"}
+        if event.get("request_id"):
+            body["request_id"] = event["request_id"]
+        logger.warning(
+            f"Memory review {run_id} asked to run `{event.get('command')}`; denied"
+        )
+        try:
+            await self._get_client().post(
+                f"{self.base_url}/v1/runs/{run_id}/approval",
+                json=body,
+                headers=self._headers,
+                timeout=10.0,
+            )
+        except httpx.HTTPError as e:
+            logger.warning(f"Memory review {run_id}: could not deny the approval: {e}")
 
     # ---- following a run ----
 

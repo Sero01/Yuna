@@ -21,6 +21,7 @@ from src.open_llm_vtuber.agent.agents.realtime.context import (  # noqa: E402
     worker_history,
 )
 from src.open_llm_vtuber.agent.agents.realtime.prompts import (  # noqa: E402
+    SUMMARY_HEADER,
     TASK_STATE_HEADER,
     USER_FACTS_HEADER,
 )
@@ -46,10 +47,149 @@ def test_window_with_fewer_exchanges_returns_everything():
     assert memory_with(3).window(0) == []
 
 
+def test_window_start_moves_in_steps_so_the_prompt_prefix_stays_cached():
+    memory = memory_with(50)
+    window = memory.window(50, step=10)
+    assert len(window) == 100 and window[0]["content"] == "u0"
+    memory.add("user", "u50")
+    # One exchange too many drops a whole step, so the start doesn't move every turn.
+    assert memory.window(50, step=10)[0]["content"] == "u10"
+    for i in range(51, 60):
+        memory.add("assistant", f"a{i - 1}")
+        memory.add("user", f"u{i}")
+    assert memory.window(50, step=10)[0]["content"] == "u10"
+    memory.add("assistant", "a59")
+    memory.add("user", "u60")
+    assert memory.window(50, step=10)[0]["content"] == "u20"
+
+
+def test_window_steps_count_exchanges_already_trimmed_from_the_buffer():
+    memory = ConversationMemory(max_messages=30)
+    for i in range(25):
+        memory.add("user", f"u{i}")
+        memory.add("assistant", f"a{i}")
+    assert memory.messages[0]["content"] == "u10"
+    # 25 exchanges so far, 13 over the limit -> drop 16 (a multiple of 4) -> start at u16.
+    assert memory.window(12, step=4)[0]["content"] == "u16"
+
+
 def test_window_returns_copies():
     memory = memory_with(1)
     memory.window(8)[0]["content"] = "changed"
     assert memory.messages[0]["content"] == "u0"
+
+
+def test_nothing_is_due_for_a_summary_before_max_turns():
+    assert memory_with(49).due_for_summary(50, keep=10) is None
+
+
+def test_the_oldest_exchanges_are_due_once_max_turns_are_unsummarized():
+    memory = ConversationMemory()
+    memory.add(
+        "assistant", "Hmph, you're back."
+    )  # a greeting before the first user turn
+    for i in range(50):
+        memory.add("user", f"u{i}")
+        memory.add("assistant", f"a{i}")
+    messages, upto = memory.due_for_summary(50, keep=10)
+    assert upto == 40
+    assert messages[0] == {"role": "assistant", "content": "Hmph, you're back."}
+    assert messages[-1] == {"role": "assistant", "content": "a39"}
+    assert len(messages) == 81
+
+
+def test_window_starts_after_the_summary_and_shows_it_first():
+    memory = memory_with(50)
+    memory.set_summary("They talked about exams.", 40)
+    window = memory.window(100, step=10)
+    assert window[0] == {
+        "role": "system",
+        "content": f"{SUMMARY_HEADER}\nThey talked about exams.",
+    }
+    assert window[1] == {"role": "user", "content": "u40"}
+    assert len(window) == 1 + 20
+
+
+def test_the_next_summary_covers_only_what_came_after_the_last_one():
+    memory = memory_with(50)
+    memory.set_summary("Part one.", 40)
+    for i in range(50, 89):
+        memory.add("user", f"u{i}")
+        memory.add("assistant", f"a{i}")
+    assert memory.due_for_summary(50, keep=10) is None  # 49 unsummarized
+    memory.add("user", "u89")
+    memory.add("assistant", "a89")
+    messages, upto = memory.due_for_summary(50, keep=10)
+    assert upto == 80
+    assert messages[0]["content"] == "u40" and messages[-1]["content"] == "a79"
+
+
+def test_an_older_summary_never_replaces_a_newer_one():
+    memory = memory_with(60)
+    memory.set_summary("Newer.", 50)
+    memory.set_summary("Older.", 40)
+    assert (memory.summary, memory.summarized_exchanges) == ("Newer.", 50)
+
+
+def test_a_capped_window_still_slides_if_summaries_keep_failing():
+    memory = memory_with(105)
+    memory.set_summary("Old.", 40)
+    # 65 unsummarized exchanges fit under a cap of 60 only by sliding past the summary.
+    window = memory.window(60, step=10)
+    assert window[1]["content"] == "u50"
+
+
+def test_summary_survives_a_reload_through_history_metadata():
+    saved = {}
+    originals = (
+        context_module.get_history,
+        context_module.get_metadata,
+        context_module.update_metadate,
+    )
+    context_module.get_history = lambda conf, uid: [
+        m
+        for i in range(50)
+        for m in (
+            {"role": "human", "content": f"u{i}"},
+            {"role": "ai", "content": f"a{i}"},
+        )
+    ]
+    context_module.get_metadata = lambda conf, uid: {"role": "metadata", **saved}
+
+    def update(conf, uid, metadata):
+        assert (conf, uid) == ("conf", "uid")
+        saved.update(metadata)
+        return True
+
+    context_module.update_metadate = update
+    try:
+        memory = ConversationMemory()
+        memory.load("conf", "uid")
+        memory.set_summary("They talked about exams.", 40)
+        reloaded = ConversationMemory()
+        reloaded.load("conf", "uid")
+    finally:
+        (
+            context_module.get_history,
+            context_module.get_metadata,
+            context_module.update_metadate,
+        ) = originals
+    assert reloaded.summary == "They talked about exams."
+    assert reloaded.summarized_exchanges == 40
+    assert reloaded.window(100, step=10)[1]["content"] == "u40"
+
+
+def test_loading_a_history_without_a_summary_clears_the_old_one():
+    originals = (context_module.get_history, context_module.get_metadata)
+    context_module.get_history = lambda conf, uid: []
+    context_module.get_metadata = lambda conf, uid: {}
+    try:
+        memory = memory_with(50)
+        memory.set_summary("Old session.", 40)
+        memory.load("conf", "other")
+    finally:
+        context_module.get_history, context_module.get_metadata = originals
+    assert (memory.summary, memory.summarized_exchanges) == ("", 0)
 
 
 def test_add_skips_empty_and_duplicate_messages_and_trims():
@@ -123,6 +263,13 @@ def test_transcript_and_worker_history():
     ]
 
 
+def test_worker_history_can_keep_only_the_last_exchanges():
+    messages = memory_with(10).window(10)
+    kept = worker_history(messages, max_turns=3)
+    assert len(kept) == 6, kept
+    assert kept[0] == {"role": "user", "content": "u7"}
+
+
 def test_task_state_message():
     assert task_state_message([]) == ""
     text = task_state_message([("t1", "t1 [running 3s] weather")])
@@ -178,6 +325,16 @@ def test_system_prompt_includes_soul_and_user_facts_and_reloads():
         future = time.time() + 5
         os.utime(user, (future, future))
         assert "- Allergic to peanuts." in builder.system_prompt()
+
+
+def test_user_facts_on_their_own():
+    with tempfile.TemporaryDirectory() as tmp:
+        user = os.path.join(tmp, "USER.md")
+        with open(user, "w", encoding="utf-8") as f:
+            f.write("Likes Pokemon.\n§\nHas a younger sister.")
+        builder = ContextBuilder("Base.", "", user)
+        assert builder.user_facts() == "- Likes Pokemon.\n- Has a younger sister."
+    assert ContextBuilder("Base.").user_facts() == ""
 
 
 def test_missing_files_are_skipped():

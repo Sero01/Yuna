@@ -23,6 +23,7 @@ from loguru import logger
 from pydub import AudioSegment
 
 from ....utils.audio_cut import cut_after_words  # noqa: F401  (re-exported)
+from ....utils.stream_audio import preload_static_clip
 from ....utils.tts_preprocessor import fix_pronunciation
 
 DEFAULT_CACHE_DIR = os.path.join("cache", "openers")
@@ -66,7 +67,19 @@ def opener_instruction(phrases: List[str]) -> str:
         "How you start speaking: begin most replies with a short interjection that fits "
         "the moment, followed by a comma or question mark, chosen from: "
         + " ".join(phrases)
-        + ". Vary them, and skip it when it would sound forced."
+        + ". An expression keyword may come before it but never replaces it: "
+        '"[anger] Hmph, you ..." rather than "[anger] You ...". '
+        "Vary them, and skip it when it would sound forced."
+    )
+
+
+def opener_reminder(phrases: List[str]) -> str:
+    """Repeated after the user's message: from the system prompt alone the talker skipped
+    the opener on ~40% of replies, mostly ones it began with an expression keyword."""
+    return (
+        "Start your reply with one of these interjections, after any expression "
+        "keyword: " + " ".join(phrases) + " (whichever fits best, but not the one your "
+        "last reply opened with; leave it out only if it would sound wrong)."
     )
 
 
@@ -164,6 +177,13 @@ class OpenerLibrary:
                 partial = path + ".partial"
                 shutil.move(rendered, partial)
                 os.replace(partial, path)
+            try:
+                # Trimmed: the voices start ~120 ms into their clips.
+                await asyncio.to_thread(preload_static_clip, path, True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # it still plays, just decoded on each use
+                logger.warning(f"Opener '{phrase}' could not be preloaded: {e}")
             self._clips[key] = path
         self._built = True
         logger.info(f"Opener clips ready: {len(self._clips)}/{len(self.phrases)}")

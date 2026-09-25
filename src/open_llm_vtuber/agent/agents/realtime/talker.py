@@ -1,7 +1,13 @@
-"""Streaming talker (OpenRouter chat completions) with provider hedging."""
+"""Streaming talker (OpenRouter chat completions) with provider racing or hedging.
+
+With a race provider set, every reply goes to the pinned provider and the race provider
+at once and the first to stream a token is spoken. Otherwise a backup provider is only
+asked once the primary has been silent for `hedge_after_s`.
+"""
 
 import asyncio
 import json
+import time
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 import httpx
@@ -66,6 +72,7 @@ class Talker:
         temperature: float = 0.8,
         max_tokens: int = 200,
         hedge_after_s: float = 1.5,
+        race_provider: str = "",
     ):
         self._get_client = get_client
         self.base_url = base_url.rstrip("/")
@@ -75,12 +82,14 @@ class Talker:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.hedge_after_s = hedge_after_s
+        self.race_provider = race_provider
 
     def body(
         self,
         messages: List[Dict[str, str]],
         max_tokens: Optional[int] = None,
         backup: bool = False,
+        race: bool = False,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {
             "model": self.model,
@@ -90,7 +99,10 @@ class Talker:
             "max_tokens": max_tokens or self.max_tokens,
             "reasoning": {"enabled": False},
         }
-        if backup:
+        if race:
+            # No fallbacks: a slow stand-in provider can't win the race, it only costs.
+            body["provider"] = {"order": [self.race_provider], "allow_fallbacks": False}
+        elif backup:
             # Prompt caching is per provider, so the backup deliberately goes elsewhere.
             body["provider"] = (
                 {"ignore": [self.provider], "sort": "latency"}
@@ -111,17 +123,31 @@ class Talker:
         max_tokens: Optional[int] = None,
         hedge: bool = True,
     ) -> AsyncIterator[str]:
+        started = time.perf_counter()
         attempts = [_Attempt(self, self.body(messages, max_tokens), "primary")]
-        try:
-            winner = (
-                await self._choose(attempts, messages, max_tokens)
-                if hedge
-                else attempts[0]
+        racing = hedge and bool(self.race_provider)
+        if racing:
+            attempts.append(
+                _Attempt(self, self.body(messages, max_tokens, race=True), "race")
             )
+        try:
+            if racing:
+                winner = await self._first_success(attempts)
+            elif hedge:
+                winner = await self._choose(attempts, messages, max_tokens)
+            else:
+                winner = attempts[0]
             for attempt in attempts:
                 if attempt is not winner:
                     attempt.cancel()
+            first = True
             async for piece in winner.pieces():
+                if first:
+                    first = False
+                    logger.info(
+                        f"Talker: first token after {time.perf_counter() - started:.2f}s "
+                        f"({winner.label})"
+                    )
                 yield piece
         finally:
             for attempt in attempts:
@@ -153,9 +179,13 @@ class Talker:
             return primary
         backup = _Attempt(self, self.body(messages, max_tokens, backup=True), "backup")
         attempts.append(backup)
-        pending = [
-            a for a in (primary, backup) if not (a.settled.is_set() and a.failed)
-        ]
+        winner = await self._first_success([primary, backup])
+        logger.info(f"Talker: hedge won by {winner.label}")
+        return winner
+
+    async def _first_success(self, attempts: List[_Attempt]) -> _Attempt:
+        """The first attempt to stream a piece (or end cleanly); TalkerError if all fail."""
+        pending = [a for a in attempts if not (a.settled.is_set() and a.failed)]
         while pending:
             waiters = {asyncio.ensure_future(a.settled.wait()): a for a in pending}
             done, not_done = await asyncio.wait(
@@ -166,12 +196,10 @@ class Talker:
             for waiter in done:
                 attempt = waiters[waiter]
                 if attempt.failed is None:
-                    logger.info(f"Talker: hedge won by {attempt.label}")
                     return attempt
                 pending.remove(attempt)
-        raise TalkerError(
-            f"talker failed: primary={primary.failed!r} backup={backup.failed!r}"
-        )
+        failures = " ".join(f"{a.label}={a.failed!r}" for a in attempts)
+        raise TalkerError(f"talker failed: {failures}")
 
     async def _sse_pieces(self, body: Dict[str, Any]) -> AsyncIterator[str]:
         headers = {

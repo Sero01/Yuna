@@ -87,6 +87,7 @@ character_config:
         talker_temperature: 0.8
         talker_max_tokens: 200
         hedge_after_s: 1.5 # 超过该秒数仍无输出时发送备用请求；0 表示关闭
+        talker_race_provider: '' # 同时把每次回复发送给该提供商，先出字者获胜（启用后不再 hedge）；留空表示关闭
         jev_model: 'typesafe/jev-1.13'
         jev_url: 'https://openrouter.ai/api/alpha/decisions'
         jev_timeout_s: 1.5
@@ -99,9 +100,16 @@ character_config:
         hermes_api_key: '' # hermes 的 API_SERVER_KEY；为空时读取环境变量 HERMES_API_KEY
         task_timeout_s: 600
         max_active_tasks: 3
+        hermes_reasoning_effort: 'high' # Hermes 运行的推理强度：none、low、high 或 max；留空 = 使用 Hermes 自身设置
+        # Jev 同时判断“这句话值得记住吗？”；超过该概率时，由一个静默的 Hermes 任务决定是否写入记忆。0 表示关闭。
+        remember_threshold: 0.5
+        share_transcripts: True # 告诉 Hermes 任务已保存的语音对话记录（chat_history/）位置
         soul_path: '' # 添加到系统提示词开头的人设文件，例如 Hermes 的 SOUL.md
         user_profile_path: '' # 关于用户的事实文件，例如 Hermes 的 memories/USER.md
-        max_turns: 8 # 发送给对话模型的对话轮数
+        max_turns: 50 # 逐字发送给对话模型的对话轮数；超过后，较早的轮次会被总结
+        summarize_history: True # 用后台生成的滚动摘要替代较早的轮次（False：每次丢弃五分之一）
+        summary_keep_turns: 10 # 总结较早轮次时逐字保留的最近对话轮数
+        worker_max_turns: 8 # 随任务发送给 Hermes 的对话轮数
         quiet_gap_s: 1.0 # 播报已完成任务前需要的安静时间（秒）
         prerender_acks: True # 提前生成“收到”确认语音
         faster_first_response: True

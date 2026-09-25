@@ -1,9 +1,9 @@
-"""Azure TTS over REST: one kept-alive connection, WAV output, edge-tts fallback.
+"""Azure TTS over REST: one kept-alive connection, raw PCM saved as trimmed WAV,
+edge-tts fallback.
 
 Run directly:  .venv/Scripts/python.exe tests/test_azure_tts.py
 """
 
-import io
 import os
 import sys
 import tempfile
@@ -11,29 +11,35 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx  # noqa: E402
+from pydub import AudioSegment  # noqa: E402
 from pydub.generators import Sine  # noqa: E402
 
 from _harness import run_module  # noqa: E402
 from src.open_llm_vtuber.tts.azure_tts import TTSEngine  # noqa: E402
 
 
-def wav_bytes():
-    buf = io.BytesIO()
-    Sine(440).to_audio_segment(duration=200).export(buf, format="wav")
-    return buf.getvalue()
+def pcm_bytes(lead_ms=0, tone_ms=200, tail_ms=0):
+    """Raw 24 kHz 16-bit mono PCM, as Azure sends for raw-24khz-16bit-mono-pcm."""
+    tone = Sine(440).to_audio_segment(duration=tone_ms, volume=-6)
+    tone = tone.set_frame_rate(24000).set_channels(1).set_sample_width(2)
+    clip = (
+        AudioSegment.silent(lead_ms, 24000) + tone + AudioSegment.silent(tail_ms, 24000)
+    )
+    return clip.raw_data
 
 
 class FakeAzure:
-    def __init__(self, status=200, headers=None):
+    def __init__(self, status=200, headers=None, body=None):
         self.status = status
         self.headers = headers or {}
+        self.body = body if body is not None else pcm_bytes()
         self.requests = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if self.status != 200:
             return httpx.Response(self.status, headers=self.headers, text="nope")
-        return httpx.Response(200, content=wav_bytes())
+        return httpx.Response(200, content=self.body)
 
 
 class FakeEdge:
@@ -82,10 +88,22 @@ def test_synthesizes_wav_with_the_configured_voice():
         "https://centralindia.tts.speech.microsoft.com/cognitiveservices/v1"
     )
     assert request.headers["ocp-apim-subscription-key"] == "azure-key"
-    assert request.headers["x-microsoft-outputformat"] == "riff-24khz-16bit-mono-pcm"
+    assert request.headers["x-microsoft-outputformat"] == "raw-24khz-16bit-mono-pcm"
     ssml = request.content.decode("utf-8")
     assert 'name="en-GB-MaisieNeural"' in ssml and 'xml:lang="en-GB"' in ssml
     assert "Fish &amp; chips &lt;now&gt;" in ssml, "text is escaped for SSML"
+
+
+def test_padding_silence_is_trimmed():
+    # Azure starts the voice ~140 ms in and pads ~850 ms after it.
+    fake = FakeAzure(body=pcm_bytes(lead_ms=140, tone_ms=500, tail_ms=850))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = make_engine(fake, tmp).generate_audio("hello", "s1")
+        audio = AudioSegment.from_file(path)
+        assert audio.frame_rate == 24000 and audio.channels == 1
+        assert 500 + 25 + 190 <= len(audio) <= 500 + 25 + 210, len(audio)
+        lead = audio[:40]
+        assert lead[:20].dBFS < -60 and lead[25:].dBFS > -30, "25 ms kept before voice"
 
 
 def test_reuses_one_http_client_so_the_connection_stays_warm():

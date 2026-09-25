@@ -9,7 +9,7 @@ from loguru import logger
 from ..agent.output_types import DisplayText, Actions
 from ..live2d_model import Live2dModel
 from ..tts.tts_interface import TTSInterface
-from ..utils.stream_audio import prepare_audio_payload
+from ..utils.stream_audio import prepare_audio_payload, static_clip_payload
 from ..utils.latency_probe import probe  # LATENCY-PROBE (throwaway)
 from .types import WebSocketSend
 
@@ -111,12 +111,14 @@ class TTSTaskManager:
             )
 
         try:
-            payload = await asyncio.to_thread(
-                prepare_audio_payload,
-                audio_path=audio_path,
-                display_text=display_text,
-                actions=actions,
-            )
+            payload = static_clip_payload(audio_path, display_text, actions)
+            if payload is None:
+                payload = await asyncio.to_thread(
+                    prepare_audio_payload,
+                    audio_path=audio_path,
+                    display_text=display_text,
+                    actions=actions,
+                )
         except Exception as e:
             logger.error(f"Error preparing audio payload for {audio_path}: {e}")
             payload = prepare_audio_payload(

@@ -24,7 +24,16 @@ def test_defaults_match_the_measured_choices():
     assert cfg.talker_model == "deepseek/deepseek-v4.1-flash"
     assert cfg.jev_model == "typesafe/jev-1.13"
     assert cfg.jev_url == "https://openrouter.ai/api/alpha/decisions"
-    assert cfg.max_turns == 8
+    # 2026-09-24: 60 real exchanges (5.1K tokens) cost no measurable latency once cached.
+    assert cfg.max_turns == 50
+    # Past max_turns the oldest exchanges become a summary; the last 10 stay verbatim.
+    assert cfg.summarize_history is True
+    assert cfg.summary_keep_turns == 10
+    assert cfg.worker_max_turns == 8
+    # OpenRouter offers GLM 5.3 Flash only at low/high/max; "medium" was silently low.
+    assert cfg.hermes_reasoning_effort == "high"
+    assert cfg.remember_threshold == 0.5
+    assert cfg.share_transcripts is True
     assert (cfg.unsure_low, cfg.unsure_high) == (0.35, 0.65)
     assert cfg.hedge_after_s == 1.5
     assert cfg.hermes_base_url == "http://localhost:8642"
@@ -37,6 +46,13 @@ def test_templates_expose_the_router_hedge_delay():
     for path in TEMPLATES:
         raw = read_yaml(path)["character_config"]["agent_config"]["agent_settings"]
         assert raw["realtime_agent"].get("jev_fallback_after_s") == 0.6, path
+
+
+def test_templates_expose_the_summary_settings():
+    for path in TEMPLATES:
+        raw = read_yaml(path)["character_config"]["agent_config"]["agent_settings"]
+        assert raw["realtime_agent"].get("summarize_history") is True, path
+        assert raw["realtime_agent"].get("summary_keep_turns") == 10, path
 
 
 def test_openers_are_off_unless_configured():
@@ -52,7 +68,13 @@ def test_templates_contain_a_valid_realtime_block():
         config = validate_config(read_yaml(path))
         rt = config.character_config.agent_config.agent_settings.realtime_agent
         assert rt is not None, f"{path}: missing realtime_agent block"
-        assert rt.max_turns == 8, path
+        assert rt.max_turns == 50, path
+        assert rt.summarize_history is True, path
+        assert rt.summary_keep_turns == 10, path
+        assert rt.worker_max_turns == 8, path
+        assert rt.hermes_reasoning_effort == "high", path
+        assert rt.remember_threshold == 0.5, path
+        assert rt.share_transcripts is True, path
         assert rt.talker_model == "deepseek/deepseek-v4.1-flash", path
 
 

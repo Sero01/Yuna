@@ -1,10 +1,26 @@
+import functools
 import os
 import re
 import json
+import threading
 import uuid
 from datetime import datetime
 from typing import Literal, List, TypedDict, Optional
 from loguru import logger
+
+
+# Messages may be stored from a worker thread (so a reply isn't held up by file I/O),
+# so every read-modify-write of a history file holds this lock.
+_write_lock = threading.RLock()
+
+
+def _serialized(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _write_lock:
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 class HistoryMessage(TypedDict):
@@ -90,6 +106,7 @@ def create_new_history(conf_uid: str) -> str:
     return history_uid
 
 
+@_serialized
 def store_message(
     conf_uid: str,
     history_uid: str,
@@ -167,6 +184,7 @@ def get_metadata(conf_uid: str, history_uid: str) -> dict:
     return {}
 
 
+@_serialized
 def update_metadate(conf_uid: str, history_uid: str, metadata: dict) -> bool:
     """Set metadata in history file
 
@@ -308,6 +326,7 @@ def get_history_list(conf_uid: str) -> List[dict]:
         return []
 
 
+@_serialized
 def modify_latest_message(
     conf_uid: str,
     history_uid: str,

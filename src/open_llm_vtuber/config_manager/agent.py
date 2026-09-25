@@ -187,6 +187,7 @@ class RealtimeAgentConfig(I18nMixin, BaseModel):
     talker_temperature: float = Field(0.8, alias="talker_temperature")
     talker_max_tokens: int = Field(200, alias="talker_max_tokens")
     hedge_after_s: float = Field(1.5, alias="hedge_after_s")
+    talker_race_provider: str = Field("", alias="talker_race_provider")
     jev_model: str = Field("typesafe/jev-1.13", alias="jev_model")
     jev_url: str = Field("https://openrouter.ai/api/alpha/decisions", alias="jev_url")
     jev_timeout_s: float = Field(1.5, alias="jev_timeout_s")
@@ -201,9 +202,15 @@ class RealtimeAgentConfig(I18nMixin, BaseModel):
     hermes_api_key: str = Field("", alias="hermes_api_key")
     task_timeout_s: float = Field(600, alias="task_timeout_s")
     max_active_tasks: int = Field(3, alias="max_active_tasks")
+    hermes_reasoning_effort: str = Field("high", alias="hermes_reasoning_effort")
+    remember_threshold: float = Field(0.5, alias="remember_threshold")
+    share_transcripts: bool = Field(True, alias="share_transcripts")
     soul_path: str = Field("", alias="soul_path")
     user_profile_path: str = Field("", alias="user_profile_path")
-    max_turns: int = Field(8, alias="max_turns")
+    max_turns: int = Field(50, alias="max_turns")
+    summarize_history: bool = Field(True, alias="summarize_history")
+    summary_keep_turns: int = Field(10, alias="summary_keep_turns")
+    worker_max_turns: int = Field(8, alias="worker_max_turns")
     quiet_gap_s: float = Field(1.0, alias="quiet_gap_s")
     prerender_acks: bool = Field(True, alias="prerender_acks")
     faster_first_response: bool = Field(True, alias="faster_first_response")
@@ -234,6 +241,10 @@ class RealtimeAgentConfig(I18nMixin, BaseModel):
         "hedge_after_s": Description(
             en="Send a backup request if no token arrives by then (0 disables)",
             zh="超过该秒数仍无输出时发送备用请求（0 表示关闭）",
+        ),
+        "talker_race_provider": Description(
+            en="Also send every reply to this provider at once and speak whichever answers first; replaces hedging ('' disables)",
+            zh="同时把每次回复请求发送给该提供商，先出字的一方获胜；启用后不再使用 hedge（留空表示关闭）",
         ),
         "jev_model": Description(
             en="Decision model used to route each turn", zh="用于每轮路由判断的决策模型"
@@ -269,9 +280,33 @@ class RealtimeAgentConfig(I18nMixin, BaseModel):
             en="File of facts about the user (e.g. Hermes memories/USER.md)",
             zh="关于用户的事实文件（例如 Hermes 的 memories/USER.md）",
         ),
+        "hermes_reasoning_effort": Description(
+            en="Reasoning effort for Hermes runs: none, low, high or max ('' = Hermes' own setting)",
+            zh="Hermes 运行的推理强度：none、low、high 或 max（留空 = 使用 Hermes 自身设置）",
+        ),
+        "remember_threshold": Description(
+            en="Jev probability above which Hermes reviews a turn for long-term memory (0 disables)",
+            zh="Jev 判断值超过该概率时，由 Hermes 判断是否写入长期记忆（0 表示关闭）",
+        ),
+        "share_transcripts": Description(
+            en="Tell Hermes tasks where the saved voice transcripts are, so they can look things up",
+            zh="告诉 Hermes 任务已保存的语音对话记录位置，以便查找",
+        ),
         "max_turns": Description(
-            en="Conversation exchanges sent to the talker",
-            zh="发送给对话模型的对话轮数",
+            en="Conversation exchanges sent to the talker word for word; past this, older ones are summarized (or dropped, if summarize_history is off)",
+            zh="逐字发送给对话模型的对话轮数；超过后，较早的轮次会被总结（若关闭 summarize_history 则被丢弃）",
+        ),
+        "summarize_history": Description(
+            en="Replace older exchanges with a running summary (made in the background) instead of dropping them",
+            zh="用后台生成的滚动摘要替代较早的对话轮次，而不是直接丢弃",
+        ),
+        "summary_keep_turns": Description(
+            en="Latest exchanges kept word for word when older ones are summarized",
+            zh="总结较早轮次时逐字保留的最近对话轮数",
+        ),
+        "worker_max_turns": Description(
+            en="Conversation exchanges sent to Hermes with a task",
+            zh="随任务发送给 Hermes 的对话轮数",
         ),
         "quiet_gap_s": Description(
             en="Silence before announcing finished tasks",

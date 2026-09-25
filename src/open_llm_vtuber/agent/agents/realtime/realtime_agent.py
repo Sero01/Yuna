@@ -5,6 +5,12 @@ Chat turns release the talker's reply as soon as Jev agrees; task turns discard 
 a Hermes run, and speak a pre-made acknowledgement instead. Finished tasks, and commands
 Hermes needs permission for, are announced through a separate `task-result` turn started
 by the websocket layer; the user's spoken yes/no answers the approval (once or deny only).
+
+Jev also says whether a turn is worth remembering; if so, a silent Hermes run decides what,
+if anything, to save to memory. Task runs get a pointer to the saved voice transcripts.
+
+Once `max_turns` exchanges pile up, all but the latest few are folded into a running
+summary in the background; the talker and Hermes tasks see it before the recent exchanges.
 """
 
 import asyncio
@@ -26,6 +32,7 @@ from typing import (
 import httpx
 from loguru import logger
 
+from ....chat_history_manager import _get_safe_history_path
 from ....config_manager import TTSPreprocessorConfig
 from ....config_manager.agent import RealtimeAgentConfig
 from ....utils.tts_preprocessor import fix_pronunciation
@@ -55,9 +62,11 @@ from .openers import (
     engine_renderer,
     match_opener,
     opener_instruction,
+    opener_reminder,
 )
 from .prompts import (
     ACK_FALLBACK_TEXT,
+    EARLY_OPENER_HINT,
     ACK_INSTRUCTION,
     ACK_USER_TURN,
     APPROVAL_EXPIRED_INSTRUCTION,
@@ -67,6 +76,10 @@ from .prompts import (
     CHANGE_INSTRUCTION,
     DENIED_INSTRUCTION,
     FALLBACK_LINE,
+    SUMMARY_CONDENSE_INSTRUCTIONS,
+    SUMMARY_INPUT,
+    SUMMARY_INSTRUCTIONS,
+    TALKER_SELF_NOTE,
     TASK_RESULTS_INSTRUCTION,
     TASK_START_FAILED_INSTRUCTION,
     UNSURE_INSTRUCTION,
@@ -78,8 +91,20 @@ from .tasks import DONE, RUNNING, TaskManager, TaskRecord, TaskStartError
 
 INSTRUCTED_MAX_TOKENS = 80  # short replies driven by a trailing system instruction
 ACK_MAX_TOKENS = 40
+# Hermes usually accepts a run within this; past it, "on it" is said without waiting
+# (a refused localhost connection takes ~2 s to fail on Windows).
+TASK_START_GRACE_S = 0.1
+# If the route isn't back by then (Jev slow, so the fallback router is racing it), the
+# reply's opener is spoken without waiting: any kind of turn can start with one.
+EARLY_OPENER_AFTER_S = 0.7
 WARM_INTERVAL_S = 30.0
 RECENT_MESSAGES_FOR_ROUTER = 6
+MESSAGES_FOR_MEMORY_REVIEW = 4  # context before the user's message
+SUMMARY_MAX_TOKENS = 800  # prompts ask for 150-250 words; DeepSeek overshoots a bit
+SUMMARY_CONDENSE_AFTER_WORDS = 400  # past this, all notes are condensed to ~250
+# With summaries on, the talker's window only grows past max_turns while a summary is being
+# made, or if they keep failing; this many times max_turns is where it starts sliding.
+WINDOW_CAP_WITH_SUMMARIES = 2
 
 _END = object()
 Output = Union[SentenceOutput, AudioOutput, Dict[str, Any]]
@@ -90,6 +115,7 @@ class SpeculativeReply:
 
     def __init__(self, tokens: AsyncIterator[str]):
         self._queue: asyncio.Queue = asyncio.Queue()
+        self._head: List[Any] = []  # items already read by peek_opener, replayed first
         self._task = asyncio.create_task(self._pump(tokens))
 
     async def _pump(self, tokens: AsyncIterator[str]) -> None:
@@ -105,9 +131,28 @@ class SpeculativeReply:
             return
         self._queue.put_nowait(_END)
 
+    async def peek_opener(self, keys) -> Optional[OpenerMatch]:
+        """Read just enough of the reply to tell whether it starts with an opener.
+        Everything read is still released later (safe to cancel part-way)."""
+        buffer, ended, found = "", False, UNDECIDED
+        while found is UNDECIDED:
+            item = await self._queue.get()
+            self._head.append(item)
+            if isinstance(item, str):
+                buffer += item
+            else:
+                ended = True
+            found = match_opener(buffer, keys, final=ended)
+        return found if isinstance(found, OpenerMatch) else None
+
+    def drop_opener(self, match: OpenerMatch) -> None:
+        """The opener found by peek_opener was spoken already; release only the rest."""
+        ends = [item for item in self._head if not isinstance(item, str)]
+        self._head = ([match.rest] if match.rest else []) + ends
+
     async def release(self) -> AsyncIterator[str]:
         while True:
-            item = await self._queue.get()
+            item = self._head.pop(0) if self._head else await self._queue.get()
             if item is _END:
                 return
             if isinstance(item, Exception):
@@ -120,6 +165,11 @@ class SpeculativeReply:
 
 async def _single(text: str) -> AsyncIterator[str]:
     yield text
+
+
+def _log_start_failure(start: "asyncio.Future") -> None:
+    if not start.cancelled() and start.exception() is not None:
+        logger.warning(f"Could not start a background task: {start.exception()}")
 
 
 class RealtimeAgent(AgentInterface):
@@ -143,6 +193,11 @@ class RealtimeAgent(AgentInterface):
         ai_name: str = "Yuna",
         warm_up: Optional[Callable[[], Awaitable[None]]] = None,
         openers: Optional[OpenerLibrary] = None,
+        worker_max_turns: int = 8,
+        remember_threshold: float = 0.5,
+        share_transcripts: bool = True,
+        summarize_history: bool = True,
+        summary_keep_turns: int = 10,
     ):
         super().__init__()
         self.router = router
@@ -151,10 +206,21 @@ class RealtimeAgent(AgentInterface):
         self.context = context
         self.memory = memory or ConversationMemory()
         self.max_turns = max_turns
+        # The window's start moves a fifth of it at a time, so the talker's cached prompt
+        # prefix survives between moves.
+        self._window_step = max(1, max_turns // 5)
+        self.summarize_history = summarize_history
+        self.summary_keep_turns = max(0, min(summary_keep_turns, max_turns - 1))
+        self._summary_task: Optional[asyncio.Task] = None
+        self._user_name = "User"
+        self.worker_max_turns = worker_max_turns
+        self.remember_threshold = remember_threshold
+        self.share_transcripts = share_transcripts
         self.quiet_gap_s = quiet_gap_s
         self.ai_name = ai_name
         self.pending_offer: Optional[str] = None
         self.openers = openers
+        self._opener_hint = opener_reminder(openers.phrases) if openers else ""
         self.ack_pool = AckPool(self.generate_ack_text)
         self._live2d_model = live2d_model
         self._tts_preprocessor_config = tts_preprocessor_config
@@ -167,6 +233,7 @@ class RealtimeAgent(AgentInterface):
         self._task_listener: Optional[Callable[[], None]] = None
         self._interrupt_handled = False
         self._reply_recorded = False  # has this turn's reply been added to memory?
+        self._early_opener = ""  # opener spoken before this turn's route was known
         self.tasks.listener = self._on_task_update
         self._pipeline = self._build_pipeline()
 
@@ -196,6 +263,8 @@ class RealtimeAgent(AgentInterface):
         )
         if openers is not None:
             system_prompt = f"{system_prompt}\n\n{opener_instruction(cfg.openers)}"
+        self_note = TALKER_SELF_NOTE.format(talker_model=cfg.talker_model)
+        system_prompt = f"{system_prompt}\n\n{self_note}"
         http = LoopBoundClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=120.0),
@@ -222,6 +291,7 @@ class RealtimeAgent(AgentInterface):
                 unsure_high=cfg.unsure_high,
                 fallback=fallback,
                 fallback_after_s=cfg.jev_fallback_after_s,
+                remember=cfg.remember_threshold > 0,
             ),
             talker=Talker(
                 http.get,
@@ -232,6 +302,7 @@ class RealtimeAgent(AgentInterface):
                 temperature=cfg.talker_temperature,
                 max_tokens=cfg.talker_max_tokens,
                 hedge_after_s=cfg.hedge_after_s,
+                race_provider=cfg.talker_race_provider,
             ),
             tasks=TaskManager(
                 http.get,
@@ -239,6 +310,7 @@ class RealtimeAgent(AgentInterface):
                 hermes_key,
                 timeout_s=cfg.task_timeout_s,
                 max_active=cfg.max_active_tasks,
+                reasoning_effort=cfg.hermes_reasoning_effort,
             ),
             context=ContextBuilder(system_prompt, cfg.soul_path, cfg.user_profile_path),
             live2d_model=live2d_model,
@@ -255,6 +327,11 @@ class RealtimeAgent(AgentInterface):
                 {"Authorization": f"Bearer {openrouter_key}"},
             ),
             openers=openers,
+            worker_max_turns=cfg.worker_max_turns,
+            remember_threshold=cfg.remember_threshold,
+            share_transcripts=cfg.share_transcripts,
+            summarize_history=cfg.summarize_history,
+            summary_keep_turns=cfg.summary_keep_turns,
         )
         agent.set_tts_engine(tts_engine)
         return agent
@@ -264,9 +341,14 @@ class RealtimeAgent(AgentInterface):
     async def chat(self, input_data: BatchInput) -> AsyncIterator[Output]:
         self._interrupt_handled = False
         self._reply_recorded = False
+        self._early_opener = ""
         self.ack_pool.fill()
         if self.openers is not None:
             self.openers.ensure_built()
+        user_name = next((t.from_name for t in input_data.texts if t.from_name), None)
+        if user_name:
+            self._user_name = user_name
+        self._maybe_summarize()
         metadata = input_data.metadata or {}
         if metadata.get("task_result"):
             async for out in self._task_result_turn():
@@ -276,7 +358,7 @@ class RealtimeAgent(AgentInterface):
         text = "\n".join(t.content for t in input_data.texts if t.content).strip()
         if input_data.images:
             logger.info("realtime_agent ignores images; the talker is text-only")
-        history = self.memory.window(self.max_turns)
+        history = self._history()
         if not metadata.get("skip_memory"):
             self.memory.add("user", text)
 
@@ -285,13 +367,13 @@ class RealtimeAgent(AgentInterface):
                 history,
                 task_state_message(self.tasks.recent_lines()),
                 current_user=text,
+                trailing=self._with_opener_hint(None),
             )
             async for out in self._speak(self.talker.stream(messages)):
                 yield out
             return
 
-        user_name = next((t.from_name for t in input_data.texts if t.from_name), None)
-        async for out in self._routed_turn(text, history, user_name or "User"):
+        async for out in self._routed_turn(text, history, self._user_name):
             yield out
 
     def handle_interrupt(self, heard_response: str) -> None:
@@ -301,7 +383,16 @@ class RealtimeAgent(AgentInterface):
         self.memory.handle_interrupt(heard_response, replace_last=self._reply_recorded)
 
     def set_memory_from_history(self, conf_uid: str, history_uid: str) -> None:
+        self._cancel_summary()  # it belongs to the conversation being replaced
         self.memory.load(conf_uid, history_uid)
+        if not self.share_transcripts:
+            return
+        try:
+            path = os.path.abspath(_get_safe_history_path(conf_uid, history_uid))
+        except ValueError as e:
+            logger.warning(f"Not sharing transcripts with Hermes: {e}")
+            return
+        self.tasks.set_transcripts(os.path.dirname(path), os.path.basename(path))
 
     def start_group_conversation(
         self, human_name: str, ai_participants: List[str]
@@ -329,21 +420,33 @@ class RealtimeAgent(AgentInterface):
                 if asking is not None
                 else None
             ),
+            known_facts=self.context.user_facts(),
         )
         speculative = SpeculativeReply(
             self.talker.stream(
-                self.context.build(history, task_state, current_user=text)
+                self.context.build(
+                    history,
+                    task_state,
+                    current_user=text,
+                    trailing=self._with_opener_hint(None),
+                )
             )
         )
+        decide = asyncio.ensure_future(self.router.decide(state))
         try:
             started = time.perf_counter()
-            route = await self.router.decide(state)
+            async for out in self._opener_before_route(speculative, decide):
+                yield out
+            route = await decide
             logger.info(
                 f"Route: {route.kind} action={route.action} task={route.task_id} "
                 f"p_task={route.p_task:.2f} via {route.source} "
                 f"in {time.perf_counter() - started:.2f}s"
             )
             offer, self.pending_offer = self.pending_offer, None
+            remember = self._worth_remembering(route)
+            if remember and route.kind not in ("new_task", "accept_offer"):
+                self.tasks.remember(self._memory_excerpt(history, text, user_name))
             rec = self.tasks.get(route.task_id) if route.kind == "followup" else None
             speak_speculative = route.kind == "chat" or (
                 route.kind == "followup"
@@ -374,7 +477,9 @@ class RealtimeAgent(AgentInterface):
                     if route.kind == "accept_offer" and offer
                     else text
                 )
-                async for out in self._start_task(request, history, task_state, text):
+                async for out in self._start_task(
+                    request, history, task_state, text, remember
+                ):
                     yield out
             elif route.action == "cancel":
                 await self.tasks.cancel(rec.id)
@@ -389,20 +494,87 @@ class RealtimeAgent(AgentInterface):
                     yield out
         finally:
             speculative.cancel()
+            decide.cancel()  # only still running if the turn was cut off
+
+    async def _opener_before_route(
+        self, speculative: SpeculativeReply, decide: "asyncio.Future"
+    ) -> AsyncIterator[Output]:
+        """If the route is slow, speak the reply's opener clip before it arrives."""
+        keys = self.openers.keys() if self.openers is not None else set()
+        if not keys:
+            return
+        done, _ = await asyncio.wait({decide}, timeout=EARLY_OPENER_AFTER_S)
+        if done:
+            return
+        peek = asyncio.ensure_future(speculative.peek_opener(keys))
+        try:
+            await asyncio.wait({decide, peek}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if not peek.done():
+                peek.cancel()  # what it read so far is still released later
+        if decide.done() or peek.cancelled() or peek.result() is None:
+            return
+        match = peek.result()
+        speculative.drop_opener(match)
+        self._early_opener = match.text
+        logger.info(
+            f"Route not back after {EARLY_OPENER_AFTER_S}s; "
+            f"speaking the opener {match.text!r} first"
+        )
+        yield self._opener_clip(match)
+
+    def _worth_remembering(self, route) -> bool:
+        return (
+            self.remember_threshold > 0
+            and route.p_remember is not None
+            and route.p_remember >= self.remember_threshold
+        )
+
+    def _memory_excerpt(self, history: List[Message], text: str, user_name: str) -> str:
+        before = transcript(
+            history[-MESSAGES_FOR_MEMORY_REVIEW:], user_name, self.ai_name
+        )
+        latest = f"{user_name}: {text}"
+        return f"{before}\n{latest}" if before else latest
 
     async def _start_task(
-        self, request: str, history: List[Message], task_state: str, text: str
+        self,
+        request: str,
+        history: List[Message],
+        task_state: str,
+        text: str,
+        remember: bool = False,
     ) -> AsyncIterator[Output]:
+        """`remember`: Jev thinks the message is also worth remembering, so the task is
+        asked to consider saving it (instead of a separate memory review).
+
+        A start that fails within TASK_START_GRACE_S is explained instead of
+        acknowledged; a slower one is acknowledged first and corrected if it fails."""
+        start = asyncio.ensure_future(
+            self.tasks.start(
+                request,
+                worker_history(history, self.worker_max_turns),
+                remember,
+                summary=self.memory.summary,
+            )
+        )
+        start.add_done_callback(_log_start_failure)  # also if the turn is cut off
+        acked = False
+        done, _ = await asyncio.wait({start}, timeout=TASK_START_GRACE_S)
+        if not done:
+            acked = True
+            async for out in self._acknowledge():
+                yield out
         try:
-            await self.tasks.start(request, worker_history(history))
+            await asyncio.shield(start)
         except TaskStartError as e:
-            logger.warning(f"Could not start a background task: {e}")
             instruction = TASK_START_FAILED_INSTRUCTION.format(reason=e)
             async for out in self._instructed(history, task_state, text, instruction):
                 yield out
             return
-        async for out in self._acknowledge():
-            yield out
+        if not acked:
+            async for out in self._acknowledge():
+                yield out
 
     async def _change_task(
         self, rec: TaskRecord, text: str, history: List[Message]
@@ -413,7 +585,8 @@ class RealtimeAgent(AgentInterface):
             try:
                 await self.tasks.start(
                     f"{rec.request} (update from the user: {text})",
-                    worker_history(history),
+                    worker_history(history, self.worker_max_turns),
+                    summary=self.memory.summary,
                 )
             except TaskStartError as e:
                 instruction = TASK_START_FAILED_INSTRUCTION.format(reason=e)
@@ -465,9 +638,9 @@ class RealtimeAgent(AgentInterface):
             )
             instructions.append(APPROVAL_REQUEST_INSTRUCTION.format(approvals=asks))
         messages = self.context.build(
-            self.memory.window(self.max_turns),
+            self._history(),
             task_state_message(self.tasks.recent_lines()),
-            trailing="\n\n".join(instructions),
+            trailing=self._with_opener_hint("\n\n".join(instructions)),
         )
         async for out in self._speak(self.talker.stream(messages)):
             yield out
@@ -500,12 +673,24 @@ class RealtimeAgent(AgentInterface):
         self, history: List[Message], task_state: str, text: str, instruction: str
     ) -> AsyncIterator[Output]:
         messages = self.context.build(
-            history, task_state, current_user=text, trailing=instruction
+            history,
+            task_state,
+            current_user=text,
+            trailing=self._with_opener_hint(instruction),
         )
         async for out in self._speak(
             self.talker.stream(messages, max_tokens=INSTRUCTED_MAX_TOKENS)
         ):
             yield out
+
+    def _with_opener_hint(self, trailing: Optional[str]) -> Optional[str]:
+        """`trailing` plus the opener reminder, for replies that are spoken."""
+        hint = self._opener_hint
+        if self._early_opener:
+            hint = EARLY_OPENER_HINT.format(opener=self._early_opener)
+        if not hint:
+            return trailing
+        return f"{trailing}\n\n{hint}" if trailing else hint
 
     async def _speak(self, tokens: AsyncIterator[str]) -> AsyncIterator[Output]:
         """Speak a token stream; record it in memory only if it finished (an interrupt
@@ -557,22 +742,96 @@ class RealtimeAgent(AgentInterface):
 
         if not isinstance(found, OpenerMatch):
             return None, rest()
+        return self._opener_clip(found), rest()
+
+    def _opener_clip(self, found: OpenerMatch) -> AudioOutput:
         expressions = (
             self._live2d_model.extract_emotion(found.tags)
             if found.tags and self._live2d_model is not None
             else []
         )
-        clip = AudioOutput(
+        return AudioOutput(
             audio_path=self.openers.clip(found.key),
             display_text=DisplayText(text=found.text),
             transcript=found.text,
             actions=Actions(expressions=expressions or None),
         )
-        return clip, rest()
+
+    def _history(self) -> List[Message]:
+        if self.summarize_history:
+            cap = WINDOW_CAP_WITH_SUMMARIES * self.max_turns
+            return self.memory.window(cap, self._window_step)
+        return self.memory.window(self.max_turns, self._window_step)
+
+    # ---- running summary ----
+
+    def _maybe_summarize(self) -> None:
+        """Start summarizing the oldest exchanges in the background once `max_turns` of
+        them aren't in the summary yet. A failed attempt is retried on the next turn."""
+        if not self.summarize_history:
+            return
+        if self._summary_task is not None and not self._summary_task.done():
+            return
+        due = self.memory.due_for_summary(self.max_turns, self.summary_keep_turns)
+        if due is not None:
+            self._summary_task = asyncio.create_task(self._summarize(*due))
+
+    async def _summarize(self, messages: List[Message], exchanges: int) -> None:
+        """Add notes on `messages` after the existing ones, which are kept word for word
+        unless all the notes together run long and get condensed."""
+        started = time.perf_counter()
+        previous = self.memory.summary
+        notes = await self._summary_call(
+            SUMMARY_INSTRUCTIONS,
+            SUMMARY_INPUT.format(
+                facts=self.context.user_facts() or "(nothing yet)",
+                summary=previous or "(nothing yet)",
+                conversation=transcript(messages, self._user_name, self.ai_name),
+            ),
+        )
+        if not notes:
+            return
+        summary = f"{previous}\n{notes}" if previous else notes
+        if len(summary.split()) > SUMMARY_CONDENSE_AFTER_WORDS:
+            shorter = await self._summary_call(SUMMARY_CONDENSE_INSTRUCTIONS, summary)
+            if shorter and len(shorter.split()) < len(summary.split()):
+                summary = shorter
+        self.memory.set_summary(summary, exchanges)
+        logger.info(
+            f"Summarized the first {exchanges} exchanges in {len(summary.split())} words "
+            f"({time.perf_counter() - started:.1f}s)"
+        )
+
+    async def _summary_call(self, instructions: str, content: str) -> str:
+        """The talker's answer, or '' (logged) if it failed or was empty."""
+        request = [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": content},
+        ]
+        try:
+            text = await self.talker.complete(request, max_tokens=SUMMARY_MAX_TOKENS)
+        except Exception as e:
+            logger.warning(f"Conversation summary failed: {e}")
+            return ""
+        text = (text or "").strip()
+        if not text:
+            logger.warning("Conversation summary came back empty")
+        return text
+
+    def _cancel_summary(self) -> None:
+        if self._summary_task is not None:
+            try:
+                self._summary_task.cancel()
+            except RuntimeError:  # its event loop is already closed
+                pass
+            self._summary_task = None
 
     def _record_reply(self, text: str) -> None:
         """Store this turn's reply; an interrupt from now on edits it instead of the
         previous one."""
+        if self._early_opener:
+            text = f"{self._early_opener} {(text or '').strip()}".strip()
+            self._early_opener = ""
         self.memory.add("assistant", text)
         self._reply_recorded = True
 
@@ -676,5 +935,6 @@ class RealtimeAgent(AgentInterface):
 
     async def close(self) -> None:
         self._stop_warm()
+        self._cancel_summary()
         self.tasks.close()
         self.ack_pool.clear()

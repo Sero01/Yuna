@@ -98,6 +98,7 @@ character_config:
         talker_temperature: 0.8
         talker_max_tokens: 200
         hedge_after_s: 1.5 # send a backup request if no token arrives by then; 0 disables
+        talker_race_provider: '' # also send every reply here at once; first to answer is spoken (replaces hedging); '' disables
         jev_model: 'typesafe/jev-1.13'
         jev_url: 'https://openrouter.ai/api/alpha/decisions'
         jev_timeout_s: 1.5
@@ -110,9 +111,17 @@ character_config:
         hermes_api_key: '' # hermes API_SERVER_KEY; falls back to the HERMES_API_KEY environment variable
         task_timeout_s: 600
         max_active_tasks: 3
+        hermes_reasoning_effort: 'high' # none, low, high or max for Hermes runs; '' = Hermes' own setting
+        # Jev also asks "is this worth remembering?"; above this probability a silent Hermes run
+        # decides whether to save it to memory. 0 disables.
+        remember_threshold: 0.5
+        share_transcripts: True # tell Hermes tasks where the saved voice transcripts (chat_history/) are
         soul_path: '' # persona file prepended to the system prompt, e.g. Hermes' SOUL.md
         user_profile_path: '' # facts about the user, e.g. Hermes' memories/USER.md
-        max_turns: 8 # conversation exchanges sent to the talker
+        max_turns: 50 # conversation exchanges sent to the talker word for word; past this, older ones are summarized
+        summarize_history: True # replace older exchanges with a running summary made in the background (False: drop them a fifth at a time)
+        summary_keep_turns: 10 # latest exchanges kept word for word when older ones are summarized
+        worker_max_turns: 8 # conversation exchanges sent to Hermes with a task
         quiet_gap_s: 1.0 # silence before announcing finished tasks
         prerender_acks: True # prepare "on it" acknowledgements as audio ahead of time
         faster_first_response: True

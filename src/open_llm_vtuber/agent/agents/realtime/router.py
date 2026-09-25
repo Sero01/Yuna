@@ -15,6 +15,7 @@ from .prompts import (
     FOLLOWUP_ACTION_Q,
     FOLLOWUP_TASK_INSTRUCTIONS,
     OFFER_Q,
+    REMEMBER_Q,
     ROUTE_Q,
 )
 
@@ -30,6 +31,7 @@ class RouterState:
     active_tasks: List[Tuple[str, str]] = field(default_factory=list)  # (task id, line)
     pending_offer: Optional[str] = None
     pending_approval: Optional[str] = None  # what Hermes is waiting to be allowed to do
+    known_facts: str = ""  # the user profile, so Jev doesn't flag what's already saved
 
 
 @dataclass
@@ -40,6 +42,8 @@ class Route:
     action: Optional[str] = None
     task_id: Optional[str] = None  # followup only
     source: str = "jev"  # jev | fallback | default
+    # Jev's probability that the message is worth remembering (None if not asked).
+    p_remember: Optional[float] = None
 
 
 def _task_lines(state: RouterState) -> str:
@@ -118,6 +122,7 @@ class JevRouter:
         unsure_high: float = 0.65,
         fallback: Optional[FallbackRouter] = None,
         fallback_after_s: float = 0.6,
+        remember: bool = False,
     ):
         self._get_client = get_client
         self.url = url
@@ -128,6 +133,7 @@ class JevRouter:
         self.unsure_high = unsure_high
         self.fallback = fallback
         self.fallback_after_s = fallback_after_s
+        self.remember = remember
 
     async def decide(self, state: RouterState) -> Route:
         """Ask Jev; if it hasn't answered after `fallback_after_s` (or failed), race
@@ -191,6 +197,8 @@ class JevRouter:
             questions["accepts_offer"] = OFFER_Q
         if state.pending_approval:
             questions["approval"] = APPROVAL_Q
+        if self.remember:
+            questions["remember"] = REMEMBER_Q
         return questions
 
     def jev_state(self, state: RouterState) -> Dict[str, str]:
@@ -203,6 +211,8 @@ class JevRouter:
             jev_state["pending_offer"] = state.pending_offer
         if state.pending_approval:
             jev_state["pending_approval"] = state.pending_approval
+        if self.remember:
+            jev_state["known_facts"] = state.known_facts or "none"
         return jev_state
 
     async def _ask(self, state: RouterState) -> Dict[str, Any]:
@@ -221,6 +231,13 @@ class JevRouter:
         return answers
 
     def _interpret(self, answers: Dict[str, Any], state: RouterState) -> Route:
+        route = self._route(answers, state)
+        remember = (answers.get("remember") or {}).get("noul")
+        if remember is not None:
+            route.p_remember = float(remember)
+        return route
+
+    def _route(self, answers: Dict[str, Any], state: RouterState) -> Route:
         route = answers["route"]
         choice = route.get("choice")
         probabilities = route.get("probabilities") or {}

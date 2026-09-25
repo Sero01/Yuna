@@ -163,5 +163,82 @@ async def test_complete_never_hedges():
     assert len(fake.bodies) == 1, fake.bodies
 
 
+class FakeRace:
+    """Serves the pinned primary and the race provider; spec = (status, chunks, delay)."""
+
+    def __init__(self, primary, race):
+        self.specs = {"together": primary, "makora": race}
+        self.bodies = []
+        self.streams = {}
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.bodies.append(body)
+        name = body["provider"]["order"][0]
+        status, chunks, first_delay = self.specs[name]
+        if status != 200:
+            return httpx.Response(status, json={"error": {"message": "overloaded"}})
+        stream = ChunkStream(chunks, first_delay=first_delay)
+        self.streams[name] = stream
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=stream
+        )
+
+
+def make_racer(fake, hedge=0.05):
+    get = LoopBoundClient(transport=httpx.MockTransport(fake.handler)).get
+    return Talker(
+        get,
+        "https://openrouter.ai/api/v1",
+        "or-key",
+        "deepseek/deepseek-v4.1-flash",
+        provider="together",
+        hedge_after_s=hedge,
+        race_provider="makora",
+    )
+
+
+async def test_race_sends_both_requests_at_once():
+    fake = FakeRace((200, sse_chunks("primary"), 0.0), (200, sse_chunks("race"), 0.3))
+    pieces = await collect(make_racer(fake))
+    assert pieces == ["primary"], pieces
+    assert [b["provider"] for b in fake.bodies] == [
+        {"order": ["together"], "allow_fallbacks": True},
+        {"order": ["makora"], "allow_fallbacks": False},
+    ], fake.bodies
+    await asyncio.sleep(0.05)
+    assert not fake.streams["makora"].finished, "the losing race stream is abandoned"
+
+
+async def test_race_speaks_whichever_answers_first():
+    fake = FakeRace((200, sse_chunks("slow"), 0.4), (200, sse_chunks("fast"), 0.0))
+    started = asyncio.get_running_loop().time()
+    pieces = await collect(make_racer(fake, hedge=5.0))
+    assert pieces == ["fast"], pieces
+    assert asyncio.get_running_loop().time() - started < 0.3
+    assert len(fake.bodies) == 2, "racing replaces the hedge request"
+
+
+async def test_race_survives_one_failing_provider():
+    fake = FakeRace((200, sse_chunks("primary"), 0.1), (429, [], 0.0))
+    assert await collect(make_racer(fake)) == ["primary"]
+
+
+async def test_race_raises_when_both_fail():
+    fake = FakeRace((500, [], 0.0), (429, [], 0.0))
+    try:
+        await collect(make_racer(fake))
+    except TalkerError as e:
+        assert "primary=" in str(e) and "race=" in str(e), e
+        return
+    raise AssertionError("expected TalkerError")
+
+
+async def test_complete_never_races():
+    fake = FakeRace((200, sse_chunks("on it."), 0.0), (200, sse_chunks("x"), 0.0))
+    assert await make_racer(fake).complete(MESSAGES) == "on it."
+    assert len(fake.bodies) == 1, fake.bodies
+
+
 if __name__ == "__main__":
     run_module(globals())

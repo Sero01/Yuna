@@ -65,8 +65,10 @@ class FakeHermes:
         start_status: int = 202,
         steer_accepted: bool = True,
         run_status: Optional[dict] = None,
+        start_delay: float = 0.0,
     ):
         self.start_status = start_status
+        self.start_delay = start_delay
         self.steer_accepted = steer_accepted
         self.run_status = run_status or {"status": "running"}
         self.approval_pending = True
@@ -86,6 +88,10 @@ class FakeHermes:
         if self.unreachable:
             raise httpx.ConnectError("connection refused", request=request)
         if request.method == "POST" and path == "/v1/runs":
+            if self.start_delay:
+                await asyncio.sleep(self.start_delay)
+            if self.unreachable:
+                raise httpx.ConnectError("connection refused", request=request)
             if self.start_status >= 300:
                 return httpx.Response(
                     self.start_status, json={"error": {"message": "nope"}}

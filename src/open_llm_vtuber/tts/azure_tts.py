@@ -1,7 +1,9 @@
 """Azure neural TTS over the REST API.
 
 One kept-alive HTTPS connection is reused for every sentence (no TLS handshake per
-sentence), and audio comes back as 24 kHz WAV, so no MP3 decode is needed downstream.
+sentence). Audio is requested as raw 24 kHz PCM, which Azure streams as it synthesizes
+(its WAV format arrives only once the whole clip is done, ~70 ms later), then padding
+silence is trimmed and the clip saved as WAV, so no MP3 decode is needed downstream.
 
 Azure serves the same neural voices as edge-tts (e.g. en-GB-MaisieNeural), so an edge-tts
 engine with the same voice can stand in when Azure fails, hits its rate limit, or runs
@@ -15,10 +17,13 @@ from xml.sax.saxutils import escape, quoteattr
 
 import httpx
 from loguru import logger
+from pydub import AudioSegment
 
+from ..utils.audio_trim import trim_padding
 from .tts_interface import TTSInterface
 
-OUTPUT_FORMAT = "riff-24khz-16bit-mono-pcm"
+OUTPUT_FORMAT = "raw-24khz-16bit-mono-pcm"
+SAMPLE_RATE = 24000
 RATE_LIMIT_PAUSE_S = 60.0  # after a 429 without Retry-After
 AUTH_PAUSE_S = 600.0  # after 401/403 (bad key, or the free quota is used up)
 
@@ -106,8 +111,14 @@ class TTSEngine(TTSInterface):
             self.new_audio_dir,
             f"{file_name_no_ext or self.temp_audio_file}.{self.file_extension}",
         )
-        with open(path, "wb") as f:
-            f.write(response.content)
+        pcm = response.content
+        audio = AudioSegment(
+            data=pcm[: len(pcm) // 2 * 2],
+            sample_width=2,
+            frame_rate=SAMPLE_RATE,
+            channels=1,
+        )
+        trim_padding(audio).export(path, format="wav")
         return path
 
     def _pause_after(self, response: httpx.Response) -> None:
