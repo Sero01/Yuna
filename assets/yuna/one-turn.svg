@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1220" height="480" viewBox="-10 -10 1220 480" role="img" aria-label="Speech becomes text, which goes to the talker and the Jev router at once. The talker's reply is held until Jev routes the turn: chat releases it to speech; a new task drops it, starts a Hermes run and plays a pre-rendered acknowledgement.">
+<svg xmlns="http://www.w3.org/2000/svg" width="1220" height="480" viewBox="-10 -10 1220 480" role="img" aria-label="Speech becomes text, which goes to the talker and the Jev router at once. The talker's reply is held until Jev routes the turn: chat and status questions release it to speech; every other route drops it. A new task starts a Hermes run and plays a pre-rendered acknowledgement after 0.1 s or once the run starts; other routes get a short new reply.">
 <style>
 svg{--surface:#FFFFFF;--surface-2:#E9EBF1;--ink:#1A1F2B;--ink-2:#7A8294;--muted:#5D6474;--line:#CDD2DC;--grid:#E1E4EB;--rose:#C23B6E;--rose-soft:#EBB3C8;--teal:#0E7F86}
 @media (prefers-color-scheme: dark){svg{--surface:#1A1E27;--surface-2:#232834;--ink:#E7E9EF;--ink-2:#8C94A5;--muted:#9AA1B0;--line:#363C4A;--grid:#252A35;--rose:#F07AA3;--rose-soft:#7A3C55;--teal:#45C2C8}}
@@ -56,7 +56,7 @@ text{fill:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Helvetica,Ar
           <rect class="box" x="350" y="60" width="190" height="64" rx="6"/>
           <text class="t" x="445" y="82" text-anchor="middle">Talker</text>
           <text class="s" x="445" y="99" text-anchor="middle">DeepSeek v4.1 flash</text>
-          <text class="s" x="445" y="114" text-anchor="middle">2nd provider if silent 1.5 s</text>
+          <text class="s" x="445" y="114" text-anchor="middle">2nd provider: raced, or at 1.5 s</text>
 
           <rect class="box" x="350" y="220" width="190" height="64" rx="6"/>
           <text class="t" x="445" y="242" text-anchor="middle">Jev router</text>
@@ -71,21 +71,23 @@ text{fill:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Helvetica,Ar
 
           <!-- hold + route -->
           <rect class="box" x="590" y="60" width="170" height="64" rx="6"/>
-          <text class="t" x="675" y="86" text-anchor="middle">Held reply</text>
-          <text class="s" x="675" y="104" text-anchor="middle">streams, not spoken yet</text>
+          <text class="t" x="675" y="82" text-anchor="middle">Held reply</text>
+          <text class="s" x="675" y="99" text-anchor="middle">streams, not spoken yet</text>
+          <text class="s" x="675" y="114" text-anchor="middle">opener may play at 0.7 s</text>
           <path class="ln rt" d="M540 92 H588" marker-end="url(#f1-rt)"/>
           <text class="lbl rt" x="565" y="84" text-anchor="middle">tokens</text>
 
-          <rect class="box hinge" x="590" y="220" width="170" height="64" rx="6"/>
+          <rect class="box hinge" x="590" y="220" width="170" height="80" rx="6"/>
           <text class="t" x="675" y="242" text-anchor="middle">Route</text>
-          <text class="s" x="675" y="259" text-anchor="middle">chat · task · follow-up</text>
-          <text class="s" x="675" y="274" text-anchor="middle">unsure at p 0.35–0.65</text>
+          <text class="s" x="675" y="259" text-anchor="middle">chat · status · task · change</text>
+          <text class="s" x="675" y="274" text-anchor="middle">cancel · unsure · approval</text>
+          <text class="s" x="675" y="289" text-anchor="middle">unsure at p 0.35–0.65</text>
           <path class="ln" d="M540 252 H588" marker-end="url(#f1-ah)"/>
           <text class="lbl" x="565" y="244" text-anchor="middle">route</text>
 
           <path class="ln rt" d="M675 220 V126" marker-end="url(#f1-rt)"/>
-          <text class="lbl rt" x="683" y="168">chat: release</text>
-          <text class="lbl" x="683" y="183">task: drop it</text>
+          <text class="lbl rt" x="683" y="168">chat, status: release</text>
+          <text class="lbl" x="683" y="183">others: drop it</text>
 
           <!-- speak -->
           <rect class="box" x="810" y="60" width="170" height="64" rx="6"/>
@@ -111,10 +113,10 @@ text{fill:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Helvetica,Ar
           <rect class="box" x="810" y="340" width="170" height="56" rx="6"/>
           <text class="t" x="895" y="362" text-anchor="middle">Task manager</text>
           <text class="s" x="895" y="380" text-anchor="middle">up to 3 runs · 600 s each</text>
-          <path class="ln tk" d="M675 284 V368 H808" marker-end="url(#f1-tk)"/>
+          <path class="ln tk" d="M675 300 V368 H808" marker-end="url(#f1-tk)"/>
           <text class="lbl tk" x="742" y="360" text-anchor="middle">new task</text>
           <path class="ln tk" d="M895 340 V286" marker-end="url(#f1-tk)"/>
-          <text class="lbl tk" x="903" y="318">run started</text>
+          <text class="lbl tk" x="903" y="318">after 0.1 s or on start</text>
 
           <rect class="box ext" x="1060" y="340" width="120" height="56" rx="6"/>
           <text class="t" x="1120" y="362" text-anchor="middle">Hermes agent</text>
@@ -127,6 +129,6 @@ text{fill:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Helvetica,Ar
     <line class="ln tk" x1="150" y1="-4" x2="180" y2="-4"/><text class="lbl" x="188" y="0">Background task</text>
     <line class="ln" x1="310" y1="-4" x2="340" y2="-4"/><text class="lbl" x="348" y="0">Input and routing</text>
     <line class="ln dash" x1="470" y1="-4" x2="500" y2="-4"/><text class="lbl" x="508" y="0">Only when the first try is slow</text>
-    <text class="lbl" x="720" y="0">Grey boxes run outside this process</text>
+    <text class="lbl" x="720" y="0">Grey boxes are outside the server; talker, Jev and TTS call hosted models</text>
   </g>
 </svg>
