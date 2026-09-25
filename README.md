@@ -9,9 +9,10 @@ Yuna starts talking with a fast model while a router decides, at the same moment
 
 ## What's different from Open-LLM-VTuber
 
-- **Real-time agent** (`realtime_agent`): a fast talker model always answers, and Jev, OpenRouter's decision model, routes each turn to chat or to a background task.
+- **Real-time agent** (`realtime_agent`): a fast talker model always answers, and Jev, TypeSafe's decision model (served through OpenRouter), routes each turn to chat or to a background task.
 - **Background tasks**: Hermes runs start, steer, stop and ask for permission by voice, and finished results are announced when you stop talking.
-- **Low first-audio latency**: pre-rendered acknowledgements and openers ("Hmph,", "Oh?", "Well,"), a backup provider if the talker is slow to start, and a shorter first sentence.
+- **Sub-second first audio**: about 0.67 s median from the end of your speech to Yuna's first sound. Pre-rendered acknowledgements and openers ("Hmph,", "Oh?", "Well,"), a second talker provider raced on every reply, faster SenseVoice decoding, and trimmed Azure audio. Details below.
+- **Long memory**: the talker sees the last 50 exchanges word for word plus a running summary of everything older. When Jev thinks something is worth remembering, Hermes decides whether to save it to its notes about you.
 - **Filler voices**: optional short "hmm" or "okay" clips play the moment you stop speaking, while the reply is still being generated.
 - **Azure TTS over REST** with an edge-tts fallback voice when Azure fails or is rate-limited, plus pronunciation fixes.
 - **Fixes**: spaces kept in saved replies, TTS kept off the event loop, and websocket sends that are safe to run concurrently.
@@ -34,7 +35,7 @@ Unsure, change, cancel and approval turns get a short talker reply (at most 80 t
 | --- | --- | --- | --- |
 | chat | spoken | The talker's reply as it streamed | Nothing |
 | follow-up · status | spoken | The talker's reply; task state is already in its prompt | Result marked as told |
-| new task | dropped | A pre-rendered acknowledgement | `POST /v1/runs` to Hermes |
+| new task | dropped | A pre-rendered acknowledgement, played at once if Hermes takes over 0.1 s to accept the run. If the start fails, a short explanation instead | `POST /v1/runs` to Hermes with the last 8 exchanges, the running summary and where the transcripts are saved |
 | follow-up · change | dropped | Short reply confirming the change | Steer the run; if Hermes refuses, stop it and start again with the update |
 | follow-up · cancel | dropped | Short reply confirming the stop | `POST /v1/runs/{id}/stop` |
 | unsure | dropped | Asks whether you want it done | Your request is saved as a pending offer |
@@ -55,7 +56,28 @@ Jev's typical answer arrives before the talker's first speakable clause.
 
 ![Timing of a chat turn: Jev routes at 0.37 s median, the talker's first clause arrives at 0.62 s median, and the opener clip starts between 0.40 and 0.62 s](assets/yuna/chat-timing.svg)
 
-Medians from a latency benchmark, with the opener range from live turns. End to end, first audio was about 2.0 s median with edge-tts, which took 0.7–1.2 s of that.
+Medians from a latency benchmark, with the opener range from live turns. If Jev is still deciding after 0.7 s, the reply's opener clip plays as soon as the talker has written it, so a slow route doesn't leave a long silence.
+
+### Getting under one second
+
+From the end of your speech to Yuna's first audio, the benchmark median went from 1.05 s to about 0.67 s, and 66 of 72 turns came in under 1 s.
+
+| What was slow | Fix | Effect |
+| --- | --- | --- |
+| The talker skipped its opener after an expression tag (about 40% of replies) | An opener reminder as a system message after your turn | Opener on 72 of 72 replies |
+| SenseVoice time grows with clip length | Trim VAD padding; decode clips of 8 s or more as 4 parallel pieces | 22 s clip: 0.84 s → 0.39 s |
+| Windows pages out the idle server | Decode 2 s of noise after 20 s idle to keep ASR warm | Cold ASR (1.1–1.3 s) avoided |
+| Silence around Azure clips | Trim at −60 dBFS | Lead 140 → 25 ms, tail 850 → 200 ms |
+| Azure `riff` output waits for the whole clip | Raw PCM output | About 70 ms faster |
+| Occasional slow first token from one provider | `talker_race_provider` sends every reply to a second provider; the first to stream wins | About $0.0002 per turn |
+
+Two things are still open. In about 1 turn in 9, both providers take around 1 s to the first token. And the web frontend's VAD waits 1.12 s of silence before it ends your turn, which isn't counted above.
+
+### Memory
+
+The talker keeps the last 50 exchanges word for word. When 50 more build up, the oldest 40 are turned into notes in the background and the latest 10 stay verbatim. New notes are appended rather than rewritten, because rewriting dropped older topics; once the notes pass 400 words they are condensed to about 250. The summary is saved with the chat history and also sent to Hermes with each task.
+
+Jev's routing call also asks whether your message is worth remembering. At 0.5 or higher, a silent Hermes run reads the recent exchange and decides what, if anything, to save to `USER.md`. The talker reads `USER.md` as known facts.
 
 ## Quick start
 
@@ -92,12 +114,19 @@ Everything lives under `character_config.agent_config.agent_settings.realtime_ag
 | `talker_model` | `deepseek/deepseek-v4.1-flash` | The model that always answers. Temperature 0.8, 200 tokens max |
 | `talker_provider` | `''` | Pin one OpenRouter provider (prompt caching is per provider); empty means fastest |
 | `hedge_after_s` | `1.5` | Starts a second request on a different provider if no token has arrived |
+| `talker_race_provider` | `''` | Sends every reply to this provider as well, and the first to stream is spoken. Replaces hedging; empty disables |
 | `jev_model` | `typesafe/jev-1.13` | Called through OpenRouter's alpha decisions endpoint |
 | `jev_fallback_after_s` | `0.6` | Races the Groq fallback router; the first usable answer wins, Jev on a tie |
 | `jev_timeout_s` | `1.5` | Jev is abandoned after this; with no answer at all, the turn is treated as chat |
 | `unsure_low` / `unsure_high` | `0.35` / `0.65` | Task probability band where Yuna asks instead of acting |
 | `max_active_tasks` | `3` | Concurrent Hermes runs; `task_timeout_s` is 600 |
-| `max_turns` | `8` | Exchanges of history in the talker prompt |
+| `hermes_reasoning_effort` | `high` | Reasoning level sent with each Hermes run; empty uses Hermes' own setting |
+| `max_turns` | `50` | Exchanges the talker sees word for word before older ones are summarized |
+| `summarize_history` | `True` | Keep a running summary of older exchanges; `False` drops them a fifth at a time instead |
+| `summary_keep_turns` | `10` | Latest exchanges left word for word when a summary is made |
+| `worker_max_turns` | `8` | Exchanges of history sent to Hermes with a task |
+| `remember_threshold` | `0.5` | Jev's "worth remembering" probability that starts a Hermes memory run; 0 disables |
+| `share_transcripts` | `True` | Tell Hermes tasks where the saved voice transcripts are |
 | `quiet_gap_s` | `1.0` | Silence required before a result is announced |
 | `openers` | `[]` | Interjections like `'Hmph,'`, `'Oh?'`, `'Well,'`, each cut from a carrier sentence and cached as a clip |
 | `prerender_acks` | `True` | Acknowledgements are generated and synthesized before they are needed |
@@ -111,13 +140,15 @@ Paths are under `src/open_llm_vtuber/`.
 | `agent/agents/realtime/realtime_agent.py` | Turn orchestration, held reply, opener split, speech pipeline |
 | `agent/agents/realtime/router.py` | Jev router and the Groq fallback race |
 | `agent/agents/realtime/talker.py` | Streaming OpenRouter client with provider hedging |
-| `agent/agents/realtime/context.py` | Memory window and prompt assembly |
-| `agent/agents/realtime/tasks.py` | Hermes Runs API client, approvals and task status lines |
+| `agent/agents/realtime/context.py` | Conversation memory, running summary and prompt assembly |
+| `agent/agents/realtime/tasks.py` | Hermes Runs API client, approvals, memory runs and task status lines |
 | `agent/agents/realtime/ack_pool.py` | Pre-generated, pre-rendered acknowledgements |
 | `agent/agents/realtime/openers.py` | Opener clips cut from a carrier sentence |
 | `agent/agents/realtime/prompts.py` | Instructions for acks, unsure, change, cancel, approvals and results |
 | `conversations/task_announcer.py` | Waits for quiet, then starts the task-result turn |
 | `conversations/filler.py` | Filler voice clips |
+| `asr/sherpa_onnx_asr.py`, `asr/audio_segments.py` | SenseVoice padding trim, split decoding and keep-warm |
+| `tts/azure_tts.py`, `utils/audio_trim.py` | Azure REST client with raw PCM output and silence trimming |
 
 ## Tests
 

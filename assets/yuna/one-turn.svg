@@ -52,7 +52,7 @@ text{fill:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Helvetica,Ar
           <text class="lbl" x="333" y="176">text, to both at once</text>
 
           <!-- talker + router -->
-          <text class="lbl" x="445" y="46" text-anchor="middle">prompt: SOUL.md · USER.md · last 8 turns · task state</text>
+          <text class="lbl" x="445" y="46" text-anchor="middle">prompt: SOUL.md · USER.md · summary + last 50 turns · task state</text>
           <rect class="box" x="350" y="60" width="190" height="64" rx="6"/>
           <text class="t" x="445" y="82" text-anchor="middle">Talker</text>
           <text class="s" x="445" y="99" text-anchor="middle">DeepSeek v4.1 flash</text>
