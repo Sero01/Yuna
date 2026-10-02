@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,6 +32,7 @@ from src.open_llm_vtuber.agent.agents.realtime.prompts import (  # noqa: E402
     DENIED_INSTRUCTION,
     CHANGE_INSTRUCTION,
     FALLBACK_LINE,
+    IDLE_NUDGES,
     MEMORY_REVIEW_INSTRUCTIONS,
     SELF_REMINDER,
     SUMMARY_CONDENSE_INSTRUCTIONS,
@@ -223,7 +225,7 @@ async def test_free_replies_are_reminded_that_hermes_is_her():
     assert SELF_REMINDER in trailing(talker.calls[-1])
 
     await collect(agent, user_turn("", proactive_speak=True, skip_memory=True))
-    assert trailing(talker.calls[-1]) == SELF_REMINDER
+    assert trailing(talker.calls[-1]) == f"{IDLE_NUDGES[0]}\n\n{SELF_REMINDER}"
 
 
 async def test_router_sees_recent_conversation_with_names():
@@ -729,11 +731,47 @@ async def test_proactive_turn_skips_routing():
         ),
     )
     assert router.states == []
-    assert agent.talker.calls[0]["messages"][-2] == {
-        "role": "user",
-        "content": "Say something.",
-    }
+    messages = agent.talker.calls[0]["messages"]
+    assert not any(m["role"] == "user" for m in messages), (
+        "the client's generic prompt isn't passed off as the user's words"
+    )
     assert not any(m["role"] == "user" for m in agent.memory.messages)
+
+
+def idle_signal():
+    return user_turn(
+        "Say something.", proactive_speak=True, skip_memory=True, skip_history=True
+    )
+
+
+async def test_idle_nudges_climb_then_go_quiet():
+    talker = FakeTalker(reply="Hmph, still there?")
+    agent, _ = make_agent(talker=talker)
+    for step in range(len(IDLE_NUDGES)):
+        outputs = await collect(agent, idle_signal())
+        assert "still there" in spoken(outputs)
+        nudge = IDLE_NUDGES[step].split("{now}")[0]
+        assert trailing(talker.calls[-1]).startswith(nudge), (step, talker.calls[-1])
+    assert await collect(agent, idle_signal()) == [], "quiet after the last nudge"
+    assert len(talker.calls) == len(IDLE_NUDGES)
+
+
+async def test_reminder_nudge_knows_the_date():
+    talker = FakeTalker(reply="Hmph.")
+    agent, _ = make_agent(talker=talker)
+    await collect(agent, idle_signal())
+    await collect(agent, idle_signal())
+    assert time.strftime("%d %B %Y") in trailing(talker.calls[-1])
+
+
+async def test_speaking_resets_the_idle_nudges():
+    talker = FakeTalker(reply="Hmph.")
+    agent, _ = make_agent(router=FakeRouter(Route("chat")), talker=talker)
+    await collect(agent, idle_signal())
+    await collect(agent, idle_signal())
+    await collect(agent, user_turn("sorry, I'm back"))
+    await collect(agent, idle_signal())
+    assert trailing(talker.calls[-1]).startswith(IDLE_NUDGES[0])
 
 
 async def test_without_summaries_the_talker_holds_the_last_eight_exchanges():

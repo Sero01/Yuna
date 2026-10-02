@@ -77,6 +77,7 @@ from .prompts import (
     CHANGE_INSTRUCTION,
     DENIED_INSTRUCTION,
     FALLBACK_LINE,
+    IDLE_NUDGES,
     OFFERED_TASK_REQUEST,
     PROMISED_TASK_REQUEST,
     SELF_REMINDER,
@@ -245,6 +246,7 @@ class RealtimeAgent(AgentInterface):
         self.quiet_gap_s = quiet_gap_s
         self.ai_name = ai_name
         self.pending_offer: Optional[str] = None
+        self._idle_nudges = 0  # spoken since the user last said anything
         # A freely spoken reply is checked afterwards for a promise or an offer.
         self.promise_threshold = promise_threshold
         self.offer_threshold = offer_threshold
@@ -397,17 +399,30 @@ class RealtimeAgent(AgentInterface):
             self.memory.add("user", text)
 
         if metadata.get("proactive_speak"):
-            messages = self.context.build(
-                history,
-                task_state_message(self.tasks.recent_lines()),
-                current_user=text,
-                trailing=self._free_reply_trailing(),
-            )
-            async for out in self._speak(self.talker.stream(messages)):
+            async for out in self._idle_nudge(history):
                 yield out
             return
 
+        self._idle_nudges = 0
         async for out in self._routed_turn(text, history, self._user_name):
+            yield out
+
+    async def _idle_nudge(self, history: List[Message]) -> AsyncIterator[Output]:
+        """The user has been quiet a while: speak the next of IDLE_NUDGES, or nothing
+        once they've all gone unanswered. The client's own prompt text is ignored."""
+        if self._idle_nudges >= len(IDLE_NUDGES):
+            logger.info("Idle signal: every nudge went unanswered; staying quiet")
+            return
+        nudge = IDLE_NUDGES[self._idle_nudges]
+        self._idle_nudges += 1
+        logger.info(f"Idle signal: nudge {self._idle_nudges} of {len(IDLE_NUDGES)}")
+        now = time.strftime("%A %d %B %Y, %I:%M %p")
+        messages = self.context.build(
+            history,
+            task_state_message(self.tasks.recent_lines()),
+            trailing=self._free_reply_trailing(nudge.format(now=now)),
+        )
+        async for out in self._speak(self.talker.stream(messages)):
             yield out
 
     def handle_interrupt(self, heard_response: str) -> None:
@@ -419,6 +434,7 @@ class RealtimeAgent(AgentInterface):
 
     def set_memory_from_history(self, conf_uid: str, history_uid: str) -> None:
         self._cancel_summary()  # it belongs to the conversation being replaced
+        self._idle_nudges = 0
         self.memory.load(conf_uid, history_uid)
         if not self.share_transcripts:
             return

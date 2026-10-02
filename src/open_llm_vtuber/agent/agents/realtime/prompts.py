@@ -44,6 +44,21 @@ UNSURE_INSTRUCTION = (
     "in-character sentence whether you should. Don't guess the answer."
 )
 
+# Spoken when the user has been quiet a while (the client's idle signal): one per silence,
+# in order; after the last, Yuna waits until the user speaks. {now} is the local time.
+IDLE_NUDGES = (
+    "The user has gone quiet for a few minutes. Pick the conversation back up: follow on "
+    "from what you were last talking about with a thought, a question or a related "
+    "tangent. One or two in-character sentences; don't mention the silence.",
+    "The user is still quiet. It is {now}. Bring up something they asked you to remind "
+    "them about, or a plan or deadline of theirs that's coming up, from what you know "
+    "about them and the conversation so far; never invent one. If there's nothing like "
+    "that, ask what they've got planned for later. Don't repeat what you said last "
+    "time. One or two in-character sentences.",
+    "The user still hasn't answered. In one short, in-character sentence, check whether "
+    "they're still there and say you'll wait.",
+)
+
 CANCEL_INSTRUCTION = (
     'You just stopped the background task "{request}" because the user asked. '
     "Confirm it in one short, in-character sentence."
