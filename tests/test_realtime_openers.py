@@ -202,7 +202,10 @@ async def test_no_reminder_without_openers():
     talker = FakeTalker(reply="Hello.")
     agent, _ = make_agent(talker=talker)
     await collect(agent, user_turn("hi yuna"))
-    assert talker.calls[0]["messages"][-1] == {"role": "user", "content": "hi yuna"}
+    assert talker.calls[0]["messages"][-2] == {"role": "user", "content": "hi yuna"}
+    assert (
+        "after any expression keyword" not in talker.calls[0]["messages"][-1]["content"]
+    )
 
 
 class quick_early_opener:

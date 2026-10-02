@@ -32,6 +32,7 @@ from src.open_llm_vtuber.agent.agents.realtime.prompts import (  # noqa: E402
     CHANGE_INSTRUCTION,
     FALLBACK_LINE,
     MEMORY_REVIEW_INSTRUCTIONS,
+    SELF_REMINDER,
     SUMMARY_CONDENSE_INSTRUCTIONS,
     SUMMARY_HEADER,
     SUMMARY_INSTRUCTIONS,
@@ -199,13 +200,30 @@ async def test_chat_turn_releases_the_speculative_reply():
     assert router.talker_calls_at_decision == [1], (
         "talker starts before routing finishes"
     )
-    assert talker.calls[0]["messages"][-1] == {"role": "user", "content": "hi yuna"}
+    assert talker.calls[0]["messages"][-2] == {"role": "user", "content": "hi yuna"}
     assert agent.memory.messages[-2:] == [
         {"role": "user", "content": "hi yuna"},
         {"role": "assistant", "content": "Hmph, hello there, dummy."},
     ]
     assert router.states[0].latest_user_message == "hi yuna"
     assert not hermes.calls("POST", "/v1/runs")
+
+
+async def test_free_replies_are_reminded_that_hermes_is_her():
+    # In the system prompt alone it still said "Hermes"/"him" in 18/48 replayed turns
+    # from 2026-10-02; with this reminder after the user's turn, 0/48.
+    talker = FakeTalker(reply="Hmph.")
+    agent, _ = make_agent(router=FakeRouter(Route("chat")), talker=talker)
+    await collect(agent, user_turn("ask hermes, not me"))
+    assert trailing(talker.calls[-1]) == SELF_REMINDER
+
+    rec = await agent.tasks.start("check the weather", [])
+    await agent.tasks.cancel(rec.id)
+    await collect(agent, user_turn("", task_result=True, skip_memory=True))
+    assert SELF_REMINDER in trailing(talker.calls[-1])
+
+    await collect(agent, user_turn("", proactive_speak=True, skip_memory=True))
+    assert trailing(talker.calls[-1]) == SELF_REMINDER
 
 
 async def test_router_sees_recent_conversation_with_names():
@@ -452,7 +470,7 @@ async def test_followup_status_on_a_finished_task_speaks_and_marks_it_told():
     outputs = await collect(agent, user_turn("so what did you find"))
     assert "Thirty four" in spoken(outputs)
     assert len(talker.calls) == 1, "status answers come from the speculative reply"
-    task_state = talker.calls[0]["messages"][-2]
+    task_state = talker.calls[0]["messages"][-3]
     assert task_state["role"] == "system" and task_state["content"].startswith(
         TASK_STATE_HEADER
     )
@@ -544,10 +562,11 @@ async def test_approval_request_is_announced_as_a_question():
         agent, user_turn("", task_result=True, skip_memory=True, skip_history=True)
     )
     assert "Allow it once?" in spoken(outputs)
-    assert trailing(talker.calls[-1]) == APPROVAL_REQUEST_INSTRUCTION.format(
+    asked = APPROVAL_REQUEST_INSTRUCTION.format(
         approvals="- restart the gateway: it wants to restart a system service "
         "(command: hermes gateway restart)"
     )
+    assert trailing(talker.calls[-1]) == f"{asked}\n\n{SELF_REMINDER}"
     assert not agent.has_untold_results(), "asked once, not on every quiet gap"
     agent.set_task_listener(None)
 
@@ -710,7 +729,7 @@ async def test_proactive_turn_skips_routing():
         ),
     )
     assert router.states == []
-    assert agent.talker.calls[0]["messages"][-1] == {
+    assert agent.talker.calls[0]["messages"][-2] == {
         "role": "user",
         "content": "Say something.",
     }
@@ -724,9 +743,9 @@ async def test_without_summaries_the_talker_holds_the_last_eight_exchanges():
     fill(agent, 12)
     await collect(agent, user_turn("now"))
     messages = agent.talker.calls[0]["messages"]
-    assert len(messages) == 1 + 16 + 1, len(messages)
+    assert len(messages) == 1 + 16 + 2, len(messages)  # + the turn and the reminder
     assert messages[1] == {"role": "user", "content": "u4"}
-    assert messages[-1] == {"role": "user", "content": "now"}
+    assert messages[-2] == {"role": "user", "content": "now"}
     assert summary_requests(agent.talker) == []
 
 
@@ -739,7 +758,7 @@ async def test_without_summaries_the_window_trims_in_steps_of_a_fifth():
     messages = agent.talker.calls[0]["messages"]
     # 55 exchanges, 5 over -> the start jumps a whole step of 10, to u10.
     assert messages[1] == {"role": "user", "content": "u10"}, messages[1]
-    assert len(messages) == 1 + 90 + 1
+    assert len(messages) == 1 + 90 + 2
 
 
 async def test_old_exchanges_are_summarized_in_the_background():
@@ -766,7 +785,7 @@ async def test_old_exchanges_are_summarized_in_the_background():
         "content": f"{SUMMARY_HEADER}\nThey talked about exams.",
     }
     assert messages[2] == {"role": "user", "content": "u40"}
-    assert messages[-1] == {"role": "user", "content": "and now"}
+    assert messages[-2] == {"role": "user", "content": "and now"}
     assert len(summary_requests(talker)) == 1
 
 
@@ -982,11 +1001,34 @@ def test_factory_builds_a_realtime_agent():
     assert agent.worker_max_turns == 8 and agent.remember_threshold == 0.5
     # Summaries on; with only 6 turns, at most 5 can be kept word for word.
     assert agent.summarize_history is True and agent.summary_keep_turns == 5
-    # The talker is told it's Yuna's voice and that Hermes is her background helper.
+    # The talker is told it's Yuna's voice and that Hermes is part of her.
     prompt = agent.context.system_prompt()
     assert prompt.startswith("You are Yuna.")
     assert "Hermes Agent" in prompt and "deepseek/deepseek-v4.1-flash" in prompt
     assert agent.promise_threshold == 0.8 and agent.offer_threshold == 0.5
+
+
+def test_the_talker_treats_hermes_as_part_of_herself():
+    # On 2026-10-02 she said "I'll poke Hermes" and "doesn't mean I have to be nice to
+    # him" in 32 of 91 replies; the user wants Hermes to be her, not a helper she asks.
+    from src.open_llm_vtuber.agent.agents.realtime import prompts
+
+    assert "is still you" in prompts.TALKER_SELF_NOTE
+    assert "I'll ask Hermes" in prompts.TALKER_SELF_NOTE  # named as what not to say
+    spoken_from = [
+        prompts.TALKER_SELF_NOTE,
+        prompts.ACK_INSTRUCTION,
+        prompts.UNSURE_INSTRUCTION,
+        prompts.TASK_START_FAILED_INSTRUCTION,
+        prompts.TASK_RESULTS_INSTRUCTION,
+        prompts.APPROVAL_REQUEST_INSTRUCTION,
+        prompts.APPROVED_INSTRUCTION,
+        prompts.DENIED_INSTRUCTION,
+        prompts.APPROVAL_EXPIRED_INSTRUCTION,
+        prompts.SUMMARY_INSTRUCTIONS,
+    ]
+    for text in spoken_from:
+        assert "helper" not in text, text
 
 
 # ---- spoken replies that promise or offer an action (2026-10-02) ----

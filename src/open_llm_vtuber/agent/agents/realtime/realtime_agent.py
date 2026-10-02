@@ -79,6 +79,7 @@ from .prompts import (
     FALLBACK_LINE,
     OFFERED_TASK_REQUEST,
     PROMISED_TASK_REQUEST,
+    SELF_REMINDER,
     STOP_ENDED_TASK_REQUEST,
     SUMMARY_CONDENSE_INSTRUCTIONS,
     SUMMARY_INPUT,
@@ -400,7 +401,7 @@ class RealtimeAgent(AgentInterface):
                 history,
                 task_state_message(self.tasks.recent_lines()),
                 current_user=text,
-                trailing=self._with_opener_hint(None),
+                trailing=self._free_reply_trailing(),
             )
             async for out in self._speak(self.talker.stream(messages)):
                 yield out
@@ -462,7 +463,7 @@ class RealtimeAgent(AgentInterface):
                     history,
                     task_state,
                     current_user=text,
-                    trailing=self._with_opener_hint(None),
+                    trailing=self._free_reply_trailing(),
                 )
             )
         )
@@ -693,7 +694,7 @@ class RealtimeAgent(AgentInterface):
         messages = self.context.build(
             self._history(),
             task_state_message(self.tasks.recent_lines()),
-            trailing=self._with_opener_hint("\n\n".join(instructions)),
+            trailing=self._free_reply_trailing("\n\n".join(instructions)),
         )
         async for out in self._speak(self.talker.stream(messages)):
             yield out
@@ -736,6 +737,12 @@ class RealtimeAgent(AgentInterface):
             self.talker.stream(messages, max_tokens=INSTRUCTED_MAX_TOKENS)
         ):
             yield out
+
+    def _free_reply_trailing(self, instruction: str = "") -> str:
+        """For replies the talker words freely: also remind it that its background work
+        (Hermes) is itself, not someone it asks."""
+        trailing = f"{instruction}\n\n{SELF_REMINDER}" if instruction else SELF_REMINDER
+        return self._with_opener_hint(trailing)
 
     def _with_opener_hint(self, trailing: Optional[str]) -> Optional[str]:
         """`trailing` plus the opener reminder, for replies that are spoken."""
