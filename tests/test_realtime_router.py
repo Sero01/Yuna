@@ -14,7 +14,11 @@ import httpx  # noqa: E402
 
 from _harness import run_module  # noqa: E402
 from src.open_llm_vtuber.agent.agents.realtime.loop_client import LoopBoundClient  # noqa: E402
-from src.open_llm_vtuber.agent.agents.realtime.prompts import REMEMBER_Q  # noqa: E402
+from src.open_llm_vtuber.agent.agents.realtime.prompts import (  # noqa: E402
+    PROMISE_Q,
+    REMEMBER_Q,
+    REPLY_OFFER_Q,
+)
 from src.open_llm_vtuber.agent.agents.realtime.router import (  # noqa: E402
     FallbackRouter,
     JevRouter,
@@ -448,6 +452,43 @@ async def test_malformed_jev_answer_uses_fallback():
     fake = FakeOpenRouter({"something": "else"}, fallback_reply='{"route": "chat"}')
     route = await make_router(fake).decide(state("hello"))
     assert route.source == "fallback", route
+
+
+async def test_reply_check_asks_about_the_spoken_reply():
+    fake = FakeOpenRouter(
+        {
+            "promise": {"type": "noul", "noul": 0.93},
+            "offer": {"type": "noul", "noul": 0.07},
+        }
+    )
+    check = await make_router(fake).check_reply(
+        "ask him not me", "Alright, I'll poke Hermes. Give me a second."
+    )
+    assert (check.p_promise, check.p_offer) == (0.93, 0.07), check
+    body = fake.jev_bodies[0]
+    assert body["questions"] == {"promise": PROMISE_Q, "offer": REPLY_OFFER_Q}
+    assert body["state"] == {
+        "latest_user_message": "ask him not me",
+        "yuna_reply": "Alright, I'll poke Hermes. Give me a second.",
+    }
+
+
+async def test_reply_check_without_a_user_message_says_none():
+    fake = FakeOpenRouter({"promise": {"noul": 0.1}, "offer": {"noul": 0.9}})
+    await make_router(fake).check_reply("", "It timed out. Want me to rerun it?")
+    assert fake.jev_bodies[0]["state"]["latest_user_message"] == "none"
+
+
+async def test_reply_check_failure_is_none_and_never_uses_the_fallback():
+    for fake in (
+        FakeOpenRouter(jev_status=500),
+        FakeOpenRouter({"promise": {"noul": 0.9}}),  # no offer answer
+        FakeOpenRouter({}, jev_delay=1.0),
+    ):
+        router = make_router(fake)
+        router.reply_check_timeout_s = 0.2
+        assert await router.check_reply("hi", "Hmph, hi.") is None
+        assert fake.fallback_bodies == []
 
 
 def test_client_is_recreated_per_loop():

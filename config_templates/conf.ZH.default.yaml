@@ -103,6 +103,10 @@ character_config:
         hermes_reasoning_effort: 'high' # Hermes 运行的推理强度：none、low、high 或 max；留空 = 使用 Hermes 自身设置
         # Jev 同时判断“这句话值得记住吗？”；超过该概率时，由一个静默的 Hermes 任务决定是否写入记忆。0 表示关闭。
         remember_threshold: 0.5
+        # 自由回复后，Jev 判断其中是否承诺或主动提出某个操作。承诺超过该值时启动任务；
+        # 主动提出超过 offer_threshold 时等待用户确认。0 表示关闭。
+        promise_threshold: 0.8
+        offer_threshold: 0.5
         share_transcripts: True # 告诉 Hermes 任务已保存的语音对话记录（chat_history/）位置
         soul_path: '' # 添加到系统提示词开头的人设文件，例如 Hermes 的 SOUL.md
         user_profile_path: '' # 关于用户的事实文件，例如 Hermes 的 memories/USER.md

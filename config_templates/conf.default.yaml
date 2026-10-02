@@ -115,6 +115,10 @@ character_config:
         # Jev also asks "is this worth remembering?"; above this probability a silent Hermes run
         # decides whether to save it to memory. 0 disables.
         remember_threshold: 0.5
+        # After a reply she speaks freely, Jev checks whether it promised or offered an action.
+        # A promise above this starts the task; an offer above offer_threshold waits for a yes. 0 disables.
+        promise_threshold: 0.8
+        offer_threshold: 0.5
         share_transcripts: True # tell Hermes tasks where the saved voice transcripts (chat_history/) are
         soul_path: '' # persona file prepended to the system prompt, e.g. Hermes' SOUL.md
         user_profile_path: '' # facts about the user, e.g. Hermes' memories/USER.md

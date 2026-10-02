@@ -15,7 +15,9 @@ from .prompts import (
     FOLLOWUP_ACTION_Q,
     FOLLOWUP_TASK_INSTRUCTIONS,
     OFFER_Q,
+    PROMISE_Q,
     REMEMBER_Q,
+    REPLY_OFFER_Q,
     ROUTE_Q,
 )
 
@@ -44,6 +46,14 @@ class Route:
     source: str = "jev"  # jev | fallback | default
     # Jev's probability that the message is worth remembering (None if not asked).
     p_remember: Optional[float] = None
+
+
+@dataclass
+class ReplyCheck:
+    """Jev's reading of a reply Yuna just spoke."""
+
+    p_promise: float  # she said she is doing something now
+    p_offer: float  # she offered to do something and is waiting for a yes
 
 
 def _task_lines(state: RouterState) -> str:
@@ -123,6 +133,7 @@ class JevRouter:
         fallback: Optional[FallbackRouter] = None,
         fallback_after_s: float = 0.6,
         remember: bool = False,
+        reply_check_timeout_s: float = 3.0,
     ):
         self._get_client = get_client
         self.url = url
@@ -134,6 +145,8 @@ class JevRouter:
         self.fallback = fallback
         self.fallback_after_s = fallback_after_s
         self.remember = remember
+        # Reply checks run after the reply, off the critical path, so they can wait longer.
+        self.reply_check_timeout_s = reply_check_timeout_s
 
     async def decide(self, state: RouterState) -> Route:
         """Ask Jev; if it hasn't answered after `fallback_after_s` (or failed), race
@@ -165,6 +178,36 @@ class JevRouter:
             for task in (jev, hedge):
                 if task is not None:
                     task.cancel()
+
+    async def check_reply(self, user_message: str, reply: str) -> Optional[ReplyCheck]:
+        """Did Yuna's spoken reply promise or offer an action? None if Jev failed (there
+        is no fallback: a missed check only means nothing extra happens)."""
+        body = {
+            "model": self.model,
+            "state": {
+                "latest_user_message": user_message or "none",
+                "yuna_reply": reply,
+            },
+            "questions": {"promise": PROMISE_Q, "offer": REPLY_OFFER_Q},
+        }
+        try:
+            response = await asyncio.wait_for(
+                self._get_client().post(
+                    self.url,
+                    json=body,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                ),
+                self.reply_check_timeout_s,
+            )
+            response.raise_for_status()
+            answers = response.json().get("answers") or {}
+            return ReplyCheck(
+                p_promise=float(answers["promise"]["noul"]),
+                p_offer=float(answers["offer"]["noul"]),
+            )
+        except Exception as e:
+            logger.warning(f"Reply check failed ({type(e).__name__}: {e})")
+            return None
 
     async def _jev_route(self, state: RouterState) -> Optional[Route]:
         try:

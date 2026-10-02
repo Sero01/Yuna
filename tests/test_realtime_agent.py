@@ -41,7 +41,7 @@ from src.open_llm_vtuber.agent.agents.realtime.prompts import (  # noqa: E402
     WORKER_SUMMARY,
 )
 from src.open_llm_vtuber.agent.agents.realtime.realtime_agent import RealtimeAgent  # noqa: E402
-from src.open_llm_vtuber.agent.agents.realtime.router import Route  # noqa: E402
+from src.open_llm_vtuber.agent.agents.realtime.router import ReplyCheck, Route  # noqa: E402
 from src.open_llm_vtuber.agent.agents.realtime.talker import TalkerError  # noqa: E402
 from src.open_llm_vtuber.agent.agents.realtime.tasks import TaskManager  # noqa: E402
 from src.open_llm_vtuber.agent.input_types import BatchInput, TextData, TextSource  # noqa: E402
@@ -49,12 +49,20 @@ from src.open_llm_vtuber.agent.output_types import AudioOutput, SentenceOutput  
 
 
 class FakeRouter:
-    def __init__(self, *routes, delay=0.0, talker=None):
+    def __init__(self, *routes, delay=0.0, talker=None, checks=(), check_delay=0.0):
         self.routes = list(routes)
         self.delay = delay
         self.talker = talker
         self.states = []
         self.talker_calls_at_decision = []
+        self.checks = list(checks)  # ReplyCheck answers, in order; None = failed
+        self.check_delay = check_delay
+        self.checked = []  # (user message, reply) per reply check
+
+    async def check_reply(self, user_message, reply):
+        self.checked.append((user_message, reply))
+        await asyncio.sleep(self.check_delay)
+        return self.checks.pop(0) if self.checks else None
 
     async def decide(self, state):
         self.states.append(state)
@@ -978,6 +986,177 @@ def test_factory_builds_a_realtime_agent():
     prompt = agent.context.system_prompt()
     assert prompt.startswith("You are Yuna.")
     assert "Hermes Agent" in prompt and "deepseek/deepseek-v4.1-flash" in prompt
+    assert agent.promise_threshold == 0.8 and agent.offer_threshold == 0.5
+
+
+# ---- spoken replies that promise or offer an action (2026-10-02) ----
+
+
+def runs(hermes):
+    return hermes.calls("POST", "/v1/runs")
+
+
+async def test_a_reply_that_promises_an_action_starts_the_task():
+    reply = "Alright, I'll poke Hermes. Give me a second."
+    talker = FakeTalker(reply=reply)
+    router = FakeRouter(Route("chat", p_task=0.1), checks=[ReplyCheck(0.95, 0.05)])
+    agent, hermes = make_agent(router=router, talker=talker)
+    outputs = await collect(agent, user_turn("ask him not me"))
+    assert "poke Hermes" in spoken(outputs)
+    await wait_until(lambda: runs(hermes))
+    assert router.checked == [("ask him not me", reply)]
+    request = runs(hermes)[0][2]["input"]
+    assert "ask him not me" in request and reply in request, request
+    assert len(talker.calls) == 1, "she already said she's on it; no second ack"
+    assert agent.pending_offer is None
+
+
+async def test_a_reply_that_offers_an_action_can_be_accepted():
+    offer = "Ugh, fair point. Want me to kill it and run the cost check again?"
+    router = FakeRouter(
+        Route("chat", p_task=0.1),
+        Route("accept_offer", p_task=0.2),
+        checks=[ReplyCheck(0.1, 0.95)],
+    )
+    agent, hermes = make_agent(router=router, talker=FakeTalker(reply=offer))
+    await collect(agent, user_turn("why is it taking so long"))
+    await collect(agent, user_turn("yes"))
+    assert offer in router.states[1].pending_offer
+    request = runs(hermes)[0][2]["input"]
+    assert offer in request and "why is it taking so long" in request, request
+    assert "the user then said: yes" in request, request
+    assert agent.pending_offer is None
+
+
+async def test_a_plain_reply_starts_nothing_and_offers_nothing():
+    for check in (ReplyCheck(0.3, 0.2), None):
+        router = FakeRouter(Route("chat"), checks=[check])
+        agent, hermes = make_agent(router=router)
+        await collect(agent, user_turn("how was your day"))
+        await asyncio.sleep(0.05)
+        assert len(router.checked) == 1
+        assert not runs(hermes) and agent.pending_offer is None
+
+
+async def test_the_next_turn_waits_for_a_late_reply_check():
+    router = FakeRouter(
+        Route("chat"),
+        Route("chat"),
+        checks=[ReplyCheck(0.1, 0.9)],
+        check_delay=0.2,
+    )
+    agent, _ = make_agent(
+        router=router, talker=FakeTalker(reply="Want me to look again?")
+    )
+    await collect(agent, user_turn("where did claude leave it"))
+    await collect(agent, user_turn("yes"))
+    assert "Want me to look again?" in (router.states[1].pending_offer or ""), (
+        router.states[1]
+    )
+
+
+async def test_an_interrupt_drops_an_unfinished_reply_check():
+    router = FakeRouter(Route("chat"), checks=[ReplyCheck(0.95, 0.0)], check_delay=0.2)
+    agent, hermes = make_agent(
+        router=router, talker=FakeTalker(reply="Fine, I'll tell him to drop it.")
+    )
+    await collect(agent, user_turn("let it build stop"))
+    agent.handle_interrupt("Fine, I'll tell")
+    await asyncio.sleep(0.3)
+    assert not runs(hermes)
+
+
+async def test_acks_and_instructed_replies_are_not_checked():
+    router = FakeRouter(
+        Route("new_task", p_task=0.97),
+        Route("unsure", p_task=0.5),
+        checks=[ReplyCheck(0.99, 0.99)] * 2,
+    )
+    agent, _ = make_agent(router=router)
+    await collect(agent, user_turn("what's the weather in delhi"))
+    await collect(agent, user_turn("is the new spiderman movie good"))
+    await asyncio.sleep(0.05)
+    assert router.checked == []
+
+
+async def test_a_task_result_reply_is_checked_too():
+    reply = "Ugh, the burger search timed out. Want me to rerun it?"
+    router = FakeRouter(checks=[ReplyCheck(0.1, 0.96)])
+    agent, hermes = make_agent(router=router, talker=FakeTalker(reply=reply))
+    agent.memory.add("user", "find burgers near me")
+    rec = await agent.tasks.start("find burgers near me", [])
+    hermes.emit("run_1", event="run.failed", error="timed out")
+    await wait_until(lambda: rec.status == "failed")
+    await collect(agent, user_turn("", task_result=True, skip_memory=True))
+    await wait_until(lambda: agent.pending_offer is not None)
+    assert router.checked == [("find burgers near me", reply)]
+    assert reply in agent.pending_offer
+
+
+async def test_thresholds_of_zero_turn_the_reply_check_off():
+    router = FakeRouter(Route("chat"), checks=[ReplyCheck(0.99, 0.99)])
+    agent, hermes = make_agent(
+        router=router, promise_threshold=0.0, offer_threshold=0.0
+    )
+    await collect(agent, user_turn("ask him not me"))
+    await asyncio.sleep(0.05)
+    assert router.checked == [] and not runs(hermes)
+
+
+async def test_a_promise_below_the_threshold_is_ignored():
+    router = FakeRouter(Route("chat"), checks=[ReplyCheck(0.75, 0.1)])
+    agent, hermes = make_agent(router=router)
+    await collect(agent, user_turn("you are a magician"))
+    await asyncio.sleep(0.05)
+    assert not runs(hermes) and agent.pending_offer is None
+
+
+# ---- follow-ups aimed at a task that already ended (2026-10-02) ----
+
+
+async def finished_task(agent, hermes, request, output):
+    rec = await agent.tasks.start(request, [])
+    hermes.emit("run_1", event="run.completed", output=output)
+    await wait_until(lambda: rec.status == "done")
+    return rec
+
+
+async def test_cancelling_a_finished_task_starts_a_task_to_stop_what_it_left():
+    talker = FakeTalker(reply="Alright, killing that session now.")
+    agent, hermes = make_agent(
+        router=FakeRouter(Route("followup", action="cancel", task_id="t1")),
+        talker=talker,
+    )
+    await finished_task(
+        agent,
+        hermes,
+        "build a cost skill with claude",
+        "Job's running in the background",
+    )
+    outputs = await collect(agent, user_turn("kill the cost check session"))
+    assert len(runs(hermes)) == 2, "a new task does the stopping"
+    request = runs(hermes)[1][2]["input"]
+    assert "kill the cost check session" in request, request
+    assert "build a cost skill with claude" in request, request
+    assert "Job's running in the background" in request, request
+    assert talker.cancelled == 1, "the free reply isn't spoken"
+    assert "killing that session" not in spoken(outputs)
+    assert agent.tasks.get("t2") is not None
+
+
+async def test_changing_a_finished_task_starts_it_again_with_the_change():
+    agent, hermes = make_agent(
+        router=FakeRouter(Route("followup", action="change", task_id="t1"))
+    )
+    await finished_task(
+        agent, hermes, "open the site in chrome", "It's open in Chrome."
+    )
+    await collect(agent, user_turn("it is not open in chrome you know"))
+    assert len(runs(hermes)) == 2
+    request = runs(hermes)[1][2]["input"]
+    assert request.startswith("it is not open in chrome you know"), request
+    assert "open the site in chrome" in request and "It's open in Chrome." in request
+    assert not hermes.calls("POST", "/steer"), "an ended run can't be steered"
 
 
 if __name__ == "__main__":

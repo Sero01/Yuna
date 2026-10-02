@@ -204,6 +204,8 @@ class RealtimeAgentConfig(I18nMixin, BaseModel):
     max_active_tasks: int = Field(3, alias="max_active_tasks")
     hermes_reasoning_effort: str = Field("high", alias="hermes_reasoning_effort")
     remember_threshold: float = Field(0.5, alias="remember_threshold")
+    promise_threshold: float = Field(0.8, alias="promise_threshold")
+    offer_threshold: float = Field(0.5, alias="offer_threshold")
     share_transcripts: bool = Field(True, alias="share_transcripts")
     soul_path: str = Field("", alias="soul_path")
     user_profile_path: str = Field("", alias="user_profile_path")
@@ -287,6 +289,14 @@ class RealtimeAgentConfig(I18nMixin, BaseModel):
         "remember_threshold": Description(
             en="Jev probability above which Hermes reviews a turn for long-term memory (0 disables)",
             zh="Jev 判断值超过该概率时，由 Hermes 判断是否写入长期记忆（0 表示关闭）",
+        ),
+        "promise_threshold": Description(
+            en="Jev probability above which a spoken reply that says she is doing something starts that task (0 disables)",
+            zh="Jev 判断回复中说“正在做某事”的概率超过该值时，启动对应任务（0 表示关闭）",
+        ),
+        "offer_threshold": Description(
+            en="Jev probability above which a spoken reply that offers to do something waits for the user's yes (0 disables)",
+            zh="Jev 判断回复中“主动提出做某事”的概率超过该值时，等待用户确认（0 表示关闭）",
         ),
         "share_transcripts": Description(
             en="Tell Hermes tasks where the saved voice transcripts are, so they can look things up",

@@ -122,6 +122,31 @@ SUMMARY_CONDENSE_INSTRUCTIONS = (
     "and nickname at least in a few words. Add nothing new. Reply with the bullets only."
 )
 
+# ---- Task requests built from what Yuna said (the worker also gets the recent history) ----
+
+# Her reply promised an action on a turn where no task was started.
+PROMISED_TASK_REQUEST = (
+    'Do what Yuna just told the user she would do. The user said: "{user}" '
+    'Yuna replied: "{reply}"'
+)
+# Her reply offered an action; the router's accept_offer adds what the user said next.
+OFFERED_TASK_REQUEST = (
+    'Yuna offered to do something for the user. The user had said: "{user}" '
+    'Yuna asked: "{reply}"'
+)
+# A cancel aimed at a task that already ended: what's left running is outside the task
+# list (on 2026-10-02 a Claude Code job Hermes started kept running after its task ended).
+STOP_ENDED_TASK_REQUEST = (
+    'The user wants something stopped: "{text}". Their earlier task "{request}" has '
+    "already ended ({outcome}), so find whatever is still running for it, such as a "
+    "background process or session it started, and stop it. If nothing is running, "
+    "say so."
+)
+CHANGE_ENDED_TASK_REQUEST = (
+    '{text} (This follows up an earlier task that has already ended: "{request}" '
+    "({outcome}).)"
+)
+
 # ---- Worker: hermes-agent run instructions ----
 
 WORKER_INSTRUCTIONS = (
@@ -264,6 +289,51 @@ REMEMBER_Q = {
         "false": (
             "Small talk, questions, jokes, requests, passing moods, what they are doing right "
             "now, or something already in known_facts."
+        ),
+    },
+}
+
+# Asked about Yuna's freely spoken replies (chat, status answers, task results), after the
+# reply: on 2026-10-02 she said "I'm on it" ~10 times on turns where no task was started,
+# and offered things ("want me to kill it?") that a "yes" then couldn't accept.
+# On that day's replies: promise >= 0.8 caught all 9 empty promises with no false alarms
+# among the chat replies; offer >= 0.5 caught all 12 offers
+# (docs/research/2026-10-02-talker-tools).
+PROMISE_Q = {
+    "type": "noul",
+    "instructions": (
+        "Yuna is a voice companion. Anything that needs a tool (looking things up, the "
+        "computer, files, apps, stopping processes) is done by her background helpers "
+        "(Hermes, Claude) through a task. Does yuna_reply tell the user she is starting "
+        "something new right now: doing, checking, asking a helper, or stopping something?"
+    ),
+    "criteria": {
+        "true": (
+            "She commits to new work now, however casually: I'm on it, I'll ask him, I'll "
+            "have Claude look into it, checking it, killing it, opening it, give me a second."
+        ),
+        "false": (
+            "She only talks: chat, opinions, answers from what she already knows, reports a "
+            "result, says a task is still running or that she'll tell them when it "
+            "finishes, or asks whether she should do something."
+        ),
+    },
+}
+
+REPLY_OFFER_Q = {
+    "type": "noul",
+    "instructions": (
+        "Does yuna_reply offer to do, check, look up, or stop something for the user, and "
+        "wait for their yes?"
+    ),
+    "criteria": {
+        "true": (
+            "She asks whether she should act: want me to check?, should I kill it?, want "
+            "me to rerun it?, want me to look again?"
+        ),
+        "false": (
+            "No offer to act: chat, a question about the user's own preferences or plans, a "
+            "question about what they meant, or something she is already doing."
         ),
     },
 }

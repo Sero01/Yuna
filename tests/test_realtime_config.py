@@ -33,6 +33,9 @@ def test_defaults_match_the_measured_choices():
     # OpenRouter offers GLM 5.3 Flash only at low/high/max; "medium" was silently low.
     assert cfg.hermes_reasoning_effort == "high"
     assert cfg.remember_threshold == 0.5
+    # 2026-10-02 replies: promise >= 0.8 had no false alarms; offer >= 0.5 caught all 12.
+    assert cfg.promise_threshold == 0.8
+    assert cfg.offer_threshold == 0.5
     assert cfg.share_transcripts is True
     assert (cfg.unsure_low, cfg.unsure_high) == (0.35, 0.65)
     assert cfg.hedge_after_s == 1.5
@@ -55,6 +58,13 @@ def test_templates_expose_the_summary_settings():
         assert raw["realtime_agent"].get("summary_keep_turns") == 10, path
 
 
+def test_templates_expose_the_reply_check_thresholds():
+    for path in TEMPLATES:
+        raw = read_yaml(path)["character_config"]["agent_config"]["agent_settings"]
+        assert raw["realtime_agent"].get("promise_threshold") == 0.8, path
+        assert raw["realtime_agent"].get("offer_threshold") == 0.5, path
+
+
 def test_openers_are_off_unless_configured():
     assert RealtimeAgentConfig().openers == []
     for path in TEMPLATES:
@@ -74,6 +84,7 @@ def test_templates_contain_a_valid_realtime_block():
         assert rt.worker_max_turns == 8, path
         assert rt.hermes_reasoning_effort == "high", path
         assert rt.remember_threshold == 0.5, path
+        assert (rt.promise_threshold, rt.offer_threshold) == (0.8, 0.5), path
         assert rt.share_transcripts is True, path
         assert rt.talker_model == "deepseek/deepseek-v4.1-flash", path
 

@@ -73,9 +73,13 @@ from .prompts import (
     APPROVAL_REQUEST_INSTRUCTION,
     APPROVED_INSTRUCTION,
     CANCEL_INSTRUCTION,
+    CHANGE_ENDED_TASK_REQUEST,
     CHANGE_INSTRUCTION,
     DENIED_INSTRUCTION,
     FALLBACK_LINE,
+    OFFERED_TASK_REQUEST,
+    PROMISED_TASK_REQUEST,
+    STOP_ENDED_TASK_REQUEST,
     SUMMARY_CONDENSE_INSTRUCTIONS,
     SUMMARY_INPUT,
     SUMMARY_INSTRUCTIONS,
@@ -87,7 +91,7 @@ from .prompts import (
 from .router import FallbackRouter, JevRouter, RouterState
 from .tags import strip_unknown_tags
 from .talker import Talker, TalkerError
-from .tasks import DONE, RUNNING, TaskManager, TaskRecord, TaskStartError
+from .tasks import DONE, FAILED, RUNNING, TaskManager, TaskRecord, TaskStartError
 
 INSTRUCTED_MAX_TOKENS = 80  # short replies driven by a trailing system instruction
 ACK_MAX_TOKENS = 40
@@ -98,6 +102,9 @@ TASK_START_GRACE_S = 0.1
 # reply's opener is spoken without waiting: any kind of turn can start with one.
 EARLY_OPENER_AFTER_S = 0.7
 WARM_INTERVAL_S = 30.0
+# How long a turn waits for the previous reply's check (it usually ends ~0.3 s after the
+# reply text, long before the user answers); after that it's dropped.
+REPLY_CHECK_WAIT_S = 1.0
 RECENT_MESSAGES_FOR_ROUTER = 6
 MESSAGES_FOR_MEMORY_REVIEW = 4  # context before the user's message
 SUMMARY_MAX_TOKENS = 800  # prompts ask for 150-250 words; DeepSeek overshoots a bit
@@ -167,6 +174,22 @@ async def _single(text: str) -> AsyncIterator[str]:
     yield text
 
 
+def _outcome(rec: TaskRecord) -> str:
+    """How an ended task ended, for a follow-up task's request."""
+    if rec.status == DONE:
+        return f"done: {rec.result[:300]}"
+    if rec.status == FAILED:
+        return f"failed: {rec.error[:150]}"
+    return "cancelled"
+
+
+def _cancel_quietly(future: "asyncio.Future") -> None:
+    try:
+        future.cancel()
+    except RuntimeError:  # its event loop is already closed
+        pass
+
+
 def _log_start_failure(start: "asyncio.Future") -> None:
     if not start.cancelled() and start.exception() is not None:
         logger.warning(f"Could not start a background task: {start.exception()}")
@@ -198,6 +221,8 @@ class RealtimeAgent(AgentInterface):
         share_transcripts: bool = True,
         summarize_history: bool = True,
         summary_keep_turns: int = 10,
+        promise_threshold: float = 0.8,
+        offer_threshold: float = 0.5,
     ):
         super().__init__()
         self.router = router
@@ -219,6 +244,11 @@ class RealtimeAgent(AgentInterface):
         self.quiet_gap_s = quiet_gap_s
         self.ai_name = ai_name
         self.pending_offer: Optional[str] = None
+        # A freely spoken reply is checked afterwards for a promise or an offer.
+        self.promise_threshold = promise_threshold
+        self.offer_threshold = offer_threshold
+        self._reply_check: Optional[asyncio.Future] = None
+        self._last_reply = ""
         self.openers = openers
         self._opener_hint = opener_reminder(openers.phrases) if openers else ""
         self.ack_pool = AckPool(self.generate_ack_text)
@@ -332,6 +362,8 @@ class RealtimeAgent(AgentInterface):
             share_transcripts=cfg.share_transcripts,
             summarize_history=cfg.summarize_history,
             summary_keep_turns=cfg.summary_keep_turns,
+            promise_threshold=cfg.promise_threshold,
+            offer_threshold=cfg.offer_threshold,
         )
         agent.set_tts_engine(tts_engine)
         return agent
@@ -349,6 +381,7 @@ class RealtimeAgent(AgentInterface):
         if user_name:
             self._user_name = user_name
         self._maybe_summarize()
+        await self._settle_reply_check()
         metadata = input_data.metadata or {}
         if metadata.get("task_result"):
             async for out in self._task_result_turn():
@@ -377,6 +410,7 @@ class RealtimeAgent(AgentInterface):
             yield out
 
     def handle_interrupt(self, heard_response: str) -> None:
+        self._cancel_reply_check()  # they may not have heard what it would act on
         if self._interrupt_handled:
             return
         self._interrupt_handled = True
@@ -444,19 +478,24 @@ class RealtimeAgent(AgentInterface):
                 f"in {time.perf_counter() - started:.2f}s"
             )
             offer, self.pending_offer = self.pending_offer, None
-            remember = self._worth_remembering(route)
-            if remember and route.kind not in ("new_task", "accept_offer"):
-                self.tasks.remember(self._memory_excerpt(history, text, user_name))
             rec = self.tasks.get(route.task_id) if route.kind == "followup" else None
+            # Cancelling or changing a task that already ended needs new work (on
+            # 2026-10-02 the free reply said "killing it" and nothing happened).
+            ended = (
+                rec is not None and rec.status != RUNNING and route.action != "status"
+            )
+            remember = self._worth_remembering(route)
+            if remember and not (route.kind in ("new_task", "accept_offer") or ended):
+                self.tasks.remember(self._memory_excerpt(history, text, user_name))
             speak_speculative = route.kind == "chat" or (
-                route.kind == "followup"
-                and (rec is None or rec.status != RUNNING or route.action == "status")
+                route.kind == "followup" and (rec is None or route.action == "status")
             )
             if speak_speculative:
                 if rec is not None:
                     self.tasks.mark_told(rec.id)
                 async for out in self._speak(speculative.release()):
                     yield out
+                self._start_reply_check(text, self._last_reply)
                 return
 
             speculative.cancel()
@@ -476,6 +515,20 @@ class RealtimeAgent(AgentInterface):
                     f"{offer} (the user then said: {text})"
                     if route.kind == "accept_offer" and offer
                     else text
+                )
+                async for out in self._start_task(
+                    request, history, task_state, text, remember
+                ):
+                    yield out
+            elif ended:
+                self.tasks.mark_told(rec.id)
+                template = (
+                    STOP_ENDED_TASK_REQUEST
+                    if route.action == "cancel"
+                    else CHANGE_ENDED_TASK_REQUEST
+                )
+                request = template.format(
+                    text=text, request=rec.request, outcome=_outcome(rec)
                 )
                 async for out in self._start_task(
                     request, history, task_state, text, remember
@@ -644,6 +697,7 @@ class RealtimeAgent(AgentInterface):
         )
         async for out in self._speak(self.talker.stream(messages)):
             yield out
+        self._start_reply_check(self._last_user_text(), self._last_reply)
 
     async def _acknowledge(self) -> AsyncIterator[Output]:
         ack = self.ack_pool.take()
@@ -763,6 +817,75 @@ class RealtimeAgent(AgentInterface):
             return self.memory.window(cap, self._window_step)
         return self.memory.window(self.max_turns, self._window_step)
 
+    # ---- promises and offers in spoken replies ----
+
+    def _start_reply_check(self, user_text: str, reply: str) -> None:
+        """Ask (in the background) whether the reply just spoken promised or offered an
+        action, so a promise gets done and a "yes" to an offer can be accepted."""
+        if not (reply or "").strip():
+            return
+        if self.promise_threshold <= 0 and self.offer_threshold <= 0:
+            return
+        self._cancel_reply_check()
+        self._reply_check = asyncio.ensure_future(self._check_reply(user_text, reply))
+
+    async def _check_reply(self, user_text: str, reply: str) -> None:
+        check = await self.router.check_reply(user_text, reply)
+        if check is None:
+            return
+        if self.promise_threshold > 0 and check.p_promise >= self.promise_threshold:
+            request = PROMISED_TASK_REQUEST.format(user=user_text, reply=reply)
+            try:
+                rec = await self.tasks.start(
+                    request,
+                    worker_history(self._history(), self.worker_max_turns),
+                    summary=self.memory.summary,
+                )
+            except TaskStartError as e:
+                logger.warning(f"Yuna promised an action, but it couldn't start: {e}")
+                return
+            logger.info(
+                f"Reply promised an action (p={check.p_promise:.2f}); started {rec.id}"
+            )
+        elif self.offer_threshold > 0 and check.p_offer >= self.offer_threshold:
+            self.pending_offer = OFFERED_TASK_REQUEST.format(
+                user=user_text, reply=reply
+            )
+            logger.info(f"Reply offered an action (p={check.p_offer:.2f})")
+
+    async def _settle_reply_check(self) -> None:
+        """Let the previous reply's check finish (briefly) before this turn reads the
+        pending offer."""
+        check, self._reply_check = self._reply_check, None
+        if check is None or check.done():
+            return
+        try:
+            same_loop = check.get_loop() is asyncio.get_running_loop()
+        except RuntimeError:
+            same_loop = False
+        if not same_loop:
+            _cancel_quietly(check)
+            return
+        done, _ = await asyncio.wait({check}, timeout=REPLY_CHECK_WAIT_S)
+        if not done:
+            logger.info("The last reply's check is still running; dropping it")
+            check.cancel()
+
+    def _cancel_reply_check(self) -> None:
+        if self._reply_check is not None:
+            _cancel_quietly(self._reply_check)
+            self._reply_check = None
+
+    def _last_user_text(self) -> str:
+        return next(
+            (
+                m["content"]
+                for m in reversed(self.memory.messages)
+                if m["role"] == "user"
+            ),
+            "",
+        )
+
     # ---- running summary ----
 
     def _maybe_summarize(self) -> None:
@@ -834,6 +957,7 @@ class RealtimeAgent(AgentInterface):
             self._early_opener = ""
         self.memory.add("assistant", text)
         self._reply_recorded = True
+        self._last_reply = (text or "").strip()
 
     def _build_pipeline(self):
         @tts_filter(self._tts_preprocessor_config)
@@ -936,5 +1060,6 @@ class RealtimeAgent(AgentInterface):
     async def close(self) -> None:
         self._stop_warm()
         self._cancel_summary()
+        self._cancel_reply_check()
         self.tasks.close()
         self.ack_pool.clear()
